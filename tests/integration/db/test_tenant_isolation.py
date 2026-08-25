@@ -595,11 +595,12 @@ def _schema_snapshot(engine: Engine) -> dict[str, object]:
             ),
             "triggers": _rows(
                 connection,
-                "SELECT table_name, trigger_name, action_timing, event_manipulation, "
+                "SELECT event_object_table AS table_name, trigger_name, "
+                "action_timing, event_manipulation, "
                 "action_statement FROM information_schema.triggers "
                 "WHERE trigger_schema = current_schema() "
-                "AND table_name = ANY(:tables) "
-                "ORDER BY table_name, trigger_name, event_manipulation",
+                "AND event_object_table = ANY(:tables) "
+                "ORDER BY event_object_table, trigger_name, event_manipulation",
                 table_names,
             ),
             "grants": _rows(
