@@ -1,0 +1,124 @@
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import DateTime, ForeignKey, String, Text, func
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.orm import Mapped, mapped_column
+
+from thinc_v5.db.base import Base, metadata
+
+BUSINESS_TABLE_NAMES = (
+    "evidence_records",
+    "assessment_records",
+    "decision_records",
+    "human_approval_records",
+    "audit_events",
+)
+
+
+class IdMixin:
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+
+
+class TenantOwnedMixin:
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+
+class CreatedAtMixin:
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class Tenant(IdMixin, CreatedAtMixin, Base):
+    __tablename__ = "tenants"
+
+    slug: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+
+
+class EvidenceRecord(IdMixin, TenantOwnedMixin, CreatedAtMixin, Base):
+    __tablename__ = "evidence_records"
+
+    source_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    raw_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    normalized_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    raw_payload_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    normalized_payload_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+class AssessmentRecord(IdMixin, TenantOwnedMixin, CreatedAtMixin, Base):
+    __tablename__ = "assessment_records"
+
+    assessment: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    assessment_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+class DecisionRecord(IdMixin, TenantOwnedMixin, CreatedAtMixin, Base):
+    __tablename__ = "decision_records"
+
+    assessment_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("assessment_records.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    decision: Mapped[str] = mapped_column(String(32), nullable=False)
+    reasons: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    decision_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+class HumanApprovalRecord(IdMixin, TenantOwnedMixin, CreatedAtMixin, Base):
+    __tablename__ = "human_approval_records"
+
+    assessment_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("assessment_records.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    approver_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    approved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    approval_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+
+
+class AuditEvent(IdMixin, TenantOwnedMixin, Base):
+    __tablename__ = "audit_events"
+
+    actor_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    entity_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    integrity_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    previous_event_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+__all__ = [
+    "AssessmentRecord",
+    "AuditEvent",
+    "BUSINESS_TABLE_NAMES",
+    "DecisionRecord",
+    "EvidenceRecord",
+    "HumanApprovalRecord",
+    "Tenant",
+    "metadata",
+]
