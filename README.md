@@ -11,6 +11,9 @@
 ## الوثائق
 
 - [المواصفة المعمارية والعلمية المعتمدة](docs/specs/THINC_V5_PLATFORM_DESIGN_AR.md)
+- [خطة تنفيذ الأساس](docs/plans/THINC_V5_FOUNDATION_IMPLEMENTATION_PLAN.md)
+- [مراجعة خطة الأساس — 14 فجوة](docs/reviews/2026-08-25-foundation-plan-review.md)
+- [الحالة الذهبية: حملة EPA Webinar](docs/cases/epa-webinar-c01/README.md)
 
 ## المبادئ
 
