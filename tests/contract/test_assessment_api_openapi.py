@@ -27,3 +27,34 @@ def test_assessment_api_openapi_matches_committed_contract() -> None:
     committed = json.loads(contract_path.read_text(encoding="utf-8"))
 
     assert app.openapi() == committed
+
+
+def test_openapi_declares_rfc_9457_problem_responses() -> None:
+    app = create_app(
+        repository=InMemoryAssessmentRepository(),
+        identity_provider=injected_test_identity,
+    )
+    paths = app.openapi()["paths"]
+    expected_statuses = {
+        ("/v1/assessments", "post"): {"400", "409", "422"},
+        ("/v1/assessments/{assessment_id}", "get"): {"404", "422"},
+        ("/v1/assessments/{assessment_id}/approvals", "post"): {
+            "400",
+            "404",
+            "409",
+            "422",
+        },
+    }
+
+    for (path, method), statuses in expected_statuses.items():
+        responses = paths[path][method]["responses"]
+        for status in statuses:
+            assert set(responses[status]["content"]) == {"application/problem+json"}
+            schema = responses[status]["content"]["application/problem+json"][
+                "schema"
+            ]
+            assert schema["title"] == "ProblemDetails"
+
+    assert "HTTPValidationError" not in app.openapi().get("components", {}).get(
+        "schemas", {}
+    )

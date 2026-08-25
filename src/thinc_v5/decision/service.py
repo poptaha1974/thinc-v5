@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -14,7 +15,11 @@ from sqlalchemy import insert, select, text
 from sqlalchemy.engine import Connection, Engine, Row
 from sqlalchemy.sql import Select
 
-from thinc_v5.db.models import AssessmentRecord, HumanApprovalRecord
+from thinc_v5.db.models import (
+    AssessmentRecord,
+    EngineOutputRecord,
+    HumanApprovalRecord,
+)
 from thinc_v5.db.session import set_tenant_context
 from thinc_v5.decision.gates import evaluate_gates
 from thinc_v5.domain.common import (
@@ -55,6 +60,41 @@ class AssessmentResponse(ResearchPreviewResult[AssessmentData]):
     status: Literal["Research Preview"] = "Research Preview"
 
 
+EngineRunner = Callable[[AssessmentInput], BaseModel]
+
+
+@dataclass(frozen=True)
+class EngineRegistration:
+    name: str
+    run: EngineRunner
+
+    def __post_init__(self) -> None:
+        if not self.name.strip():
+            raise ValueError("engine name must not be blank")
+        if len(self.name) > 100:
+            raise ValueError("engine name must not exceed 100 characters")
+
+
+class EngineRegistry:
+    def __init__(self, registrations: Sequence[EngineRegistration]) -> None:
+        names = [registration.name for registration in registrations]
+        if len(names) != len(set(names)):
+            raise ValueError("engine names must be unique")
+        self._registrations = tuple(registrations)
+
+    @property
+    def registrations(self) -> tuple[EngineRegistration, ...]:
+        return self._registrations
+
+
+@dataclass(frozen=True)
+class StoredEngineOutput:
+    engine_name: str
+    output: dict[str, Any]
+    output_hash: str
+    provenance: dict[str, Any]
+
+
 @dataclass(frozen=True)
 class StoredAssessment:
     request_hash: str
@@ -68,6 +108,13 @@ class StoredApproval:
 
 
 class AssessmentRepository(Protocol):
+    def save_engine_output(
+        self,
+        tenant_id: UUID,
+        assessment_id: str,
+        stored: StoredEngineOutput,
+    ) -> None: ...
+
     def get_by_idempotency_key(
         self,
         tenant_id: UUID,
@@ -110,6 +157,22 @@ class InMemoryAssessmentRepository:
         self._by_id: dict[tuple[UUID, str], AssessmentResponse] = {}
         self._approvals: dict[tuple[UUID, str], StoredApproval] = {}
         self._approval_idempotency: dict[tuple[UUID, str], StoredApproval] = {}
+        self._engine_outputs: dict[
+            tuple[UUID, str, str], StoredEngineOutput
+        ] = {}
+
+    def save_engine_output(
+        self,
+        tenant_id: UUID,
+        assessment_id: str,
+        stored: StoredEngineOutput,
+    ) -> None:
+        with self._lock:
+            key = (tenant_id, assessment_id, stored.engine_name)
+            prior = self._engine_outputs.get(key)
+            if prior is not None and prior.output_hash != stored.output_hash:
+                raise IdempotencyConflict
+            self._engine_outputs[key] = deepcopy(stored)
 
     def get_by_idempotency_key(
         self,
@@ -181,6 +244,37 @@ class SqlAlchemyAssessmentRepository:
 
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
+
+    def save_engine_output(
+        self,
+        tenant_id: UUID,
+        assessment_id: str,
+        stored: StoredEngineOutput,
+    ) -> None:
+        with self._engine.begin() as connection:
+            set_tenant_context(connection, tenant_id)
+            prior_hash = connection.execute(
+                select(EngineOutputRecord.output_hash).where(
+                    EngineOutputRecord.tenant_id == tenant_id,
+                    EngineOutputRecord.assessment_id == assessment_id,
+                    EngineOutputRecord.engine_name == stored.engine_name,
+                )
+            ).scalar_one_or_none()
+            if prior_hash is not None:
+                if prior_hash != stored.output_hash:
+                    raise IdempotencyConflict
+                return
+            connection.execute(
+                insert(EngineOutputRecord).values(
+                    id=uuid4(),
+                    tenant_id=tenant_id,
+                    assessment_id=assessment_id,
+                    engine_name=stored.engine_name,
+                    output=stored.output,
+                    output_hash=stored.output_hash,
+                    provenance=stored.provenance,
+                )
+            )
 
     def get_by_idempotency_key(
         self,
@@ -317,10 +411,10 @@ class AssessmentService:
     def __init__(
         self,
         repository: AssessmentRepository,
-        economics_engine: EconomicsEngine | None = None,
+        engine_registry: EngineRegistry | None = None,
     ) -> None:
         self._repository = repository
-        self._economics_engine = economics_engine or EconomicsEngine()
+        self._engine_registry = engine_registry or foundation_engine_registry()
 
     def create_assessment(
         self,
@@ -341,10 +435,28 @@ class AssessmentService:
             return prior.response
 
         assessment_id = str(uuid4())
-        economics = self._economics_engine.assess(
-            request.economics,
-            request.provenance,
-        )
+        engine_outputs: dict[str, BaseModel] = {}
+        for registration in self._engine_registry.registrations:
+            output = registration.run(request)
+            output_payload = output.model_dump(mode="json")
+            self._repository.save_engine_output(
+                tenant_id,
+                assessment_id,
+                StoredEngineOutput(
+                    engine_name=registration.name,
+                    output=output_payload,
+                    output_hash=_json_hash(output_payload),
+                    provenance=request.provenance.model_dump(mode="json"),
+                ),
+            )
+            engine_outputs[registration.name] = output
+
+        economics_output = engine_outputs.get("economics")
+        if not isinstance(economics_output, EconomicsAssessment):
+            raise EngineContractError(
+                "registry must provide an EconomicsAssessment named 'economics'"
+            )
+        economics = economics_output
         gate_results = evaluate_gates(
             GateContext(
                 requested_decision=request.requested_decision,
@@ -439,6 +551,25 @@ class ApprovalRequestIdentity(BaseModel):
     assessment_id: str
     approver_id: str
     approved_at: datetime | None
+
+
+class EngineContractError(RuntimeError):
+    pass
+
+
+def foundation_engine_registry() -> EngineRegistry:
+    economics_engine = EconomicsEngine()
+    return EngineRegistry(
+        (
+            EngineRegistration(
+                name="economics",
+                run=lambda request: economics_engine.assess(
+                    request.economics,
+                    request.provenance,
+                ),
+            ),
+        )
+    )
 
 
 def _model_hash(model: BaseModel) -> str:

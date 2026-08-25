@@ -10,6 +10,7 @@ from sqlalchemy import text
 from tests.integration.db.conftest import MigratedDatabase
 from thinc_v5.api.app import create_app
 from thinc_v5.api.routes.assessments import TestIdentity
+from thinc_v5.db.session import set_tenant_context
 from thinc_v5.decision.service import (
     InMemoryAssessmentRepository,
     SqlAlchemyAssessmentRepository,
@@ -220,6 +221,18 @@ def test_postgresql_repository_persists_assessment_under_rls(
         headers=headers,
         json=complete_assessment_payload(),
     )
+    with migrated_database.app_engine.begin() as connection:
+        set_tenant_context(connection, tenant_id)
+        stored_outputs = connection.execute(
+            text(
+                "SELECT engine_name, output FROM engine_output_records "
+                "WHERE assessment_id = :assessment_id"
+            ),
+            {"assessment_id": created.json()["assessment_id"]},
+        ).all()
 
     assert created.status_code == 201
     assert duplicate.json() == created.json()
+    assert len(stored_outputs) == 1
+    assert stored_outputs[0].engine_name == "economics"
+    assert stored_outputs[0].output["delivered_contribution_profit"] == "300"

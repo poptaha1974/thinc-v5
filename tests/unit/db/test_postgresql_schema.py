@@ -17,6 +17,7 @@ from thinc_v5.db.models import (
     AssessmentRecord,
     AuditEvent,
     DecisionRecord,
+    EngineOutputRecord,
     EvidenceRecord,
     HumanApprovalRecord,
     metadata,
@@ -95,6 +96,25 @@ def test_api_post_idempotency_keys_are_unique_within_each_tenant() -> None:
             column.name
             for column in _unique(table, "tenant_id", "idempotency_key").columns
         } == {"tenant_id", "idempotency_key"}
+
+
+def test_engine_outputs_are_independent_tenant_owned_records() -> None:
+    table = cast(Table, EngineOutputRecord.__table__)
+
+    assert table.name in BUSINESS_TABLE_NAMES
+    assert table.c.tenant_id.nullable is False
+    assert table.c.assessment_id.nullable is False
+    assert table.c.engine_name.nullable is False
+    assert isinstance(table.c.output.type, postgresql.JSONB)
+    assert {
+        column.name
+        for column in _unique(
+            table,
+            "tenant_id",
+            "assessment_id",
+            "engine_name",
+        ).columns
+    } == {"tenant_id", "assessment_id", "engine_name"}
 
 
 def test_persistence_models_are_not_domain_models() -> None:

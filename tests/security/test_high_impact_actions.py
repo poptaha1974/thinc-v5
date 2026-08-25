@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
+import pytest
 from fastapi import Header
 from fastapi.testclient import TestClient
 
@@ -132,3 +133,59 @@ def test_approval_idempotency_key_cannot_be_replayed_by_another_identity() -> No
     assert first.status_code == 201
     assert replay.status_code == 409
     assert replay.headers["content-type"].startswith("application/problem+json")
+
+
+@pytest.mark.parametrize("actor_id", ["   ", "x" * 256])
+def test_create_rejects_invalid_test_identity_with_problem_details(
+    actor_id: str,
+) -> None:
+    response = build_client().post(
+        "/v1/assessments",
+        headers={
+            **TENANT_A_HEADERS,
+            "X-Test-Identity": actor_id,
+            "Idempotency-Key": "invalid-identity-create",
+        },
+        json=complete_assessment_payload(),
+    )
+
+    assert response.status_code == 422
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert response.json()["status"] == 422
+
+
+def test_approval_rejects_blank_test_identity_with_problem_details() -> None:
+    client = build_client()
+    created = client.post(
+        "/v1/assessments",
+        headers={**TENANT_A_HEADERS, "Idempotency-Key": "identity-bound-create"},
+        json=complete_assessment_payload(),
+    ).json()
+
+    response = client.post(
+        f"/v1/assessments/{created['assessment_id']}/approvals",
+        headers={
+            **TENANT_A_HEADERS,
+            "X-Test-Identity": "   ",
+            "Idempotency-Key": "invalid-identity-approval",
+        },
+        json={},
+    )
+
+    assert response.status_code == 422
+    assert response.headers["content-type"].startswith("application/problem+json")
+
+
+def test_create_rejects_blank_tenant_header_with_problem_details() -> None:
+    response = build_client().post(
+        "/v1/assessments",
+        headers={
+            **TENANT_A_HEADERS,
+            "X-Tenant-ID": "   ",
+            "Idempotency-Key": "invalid-tenant-create",
+        },
+        json=complete_assessment_payload(),
+    )
+
+    assert response.status_code == 422
+    assert response.headers["content-type"].startswith("application/problem+json")

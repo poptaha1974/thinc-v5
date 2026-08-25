@@ -22,6 +22,7 @@ from thinc_v5.db.base import Base, metadata
 BUSINESS_TABLE_NAMES = (
     "evidence_records",
     "assessment_records",
+    "engine_output_records",
     "decision_records",
     "human_approval_records",
     "audit_events",
@@ -104,6 +105,26 @@ class AssessmentRecord(IdMixin, TenantOwnedMixin, CreatedAtMixin, Base):
     provenance: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
 
 
+class EngineOutputRecord(IdMixin, TenantOwnedMixin, CreatedAtMixin, Base):
+    __tablename__ = "engine_output_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "assessment_id",
+            "engine_name",
+            name=(
+                "uq_engine_output_records_tenant_id_assessment_id_engine_name"
+            ),
+        ),
+    )
+
+    assessment_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    engine_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    output: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    output_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
 class DecisionRecord(IdMixin, TenantOwnedMixin, CreatedAtMixin, Base):
     __tablename__ = "decision_records"
     __table_args__ = (
@@ -175,6 +196,7 @@ __all__ = [
     "AuditEvent",
     "BUSINESS_TABLE_NAMES",
     "DecisionRecord",
+    "EngineOutputRecord",
     "EvidenceRecord",
     "HumanApprovalRecord",
     "Tenant",

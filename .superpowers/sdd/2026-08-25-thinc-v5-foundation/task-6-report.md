@@ -41,3 +41,26 @@ deployment until production authentication and authorization are supplied.
 The local interpreter was Python 3.14.4 while the project declares Python 3.12.
 FastAPI emitted an upstream `asyncio.iscoroutinefunction` deprecation warning on
 3.14; this does not represent a passing test on the declared Python 3.12 runtime.
+
+## Review round 1/5
+
+- Added an injected `EngineRegistry` contract. The production registry still
+  contains Economics only, while callers can inject future registrations.
+- Each registered engine output is now written to its own tenant-owned,
+  RLS-protected `engine_output_records` row in a separate transaction before
+  gate evaluation. Tests cover registration order and retention of an earlier
+  output when a later engine raises.
+- Declared model-derived RFC 9457 responses using only
+  `application/problem+json` for relevant 400/404/409/422 responses and updated
+  the API-only OpenAPI snapshot. The legacy FastAPI `HTTPValidationError`
+  contract is absent.
+- Bounded the test-only actor ID to 255 nonblank characters and explicitly
+  validates textual tenant IDs as nonblank/canonical UUID-sized input. Pydantic
+  dependency failures now return RFC 9457 status 422 for create and approval.
+- API/security/contract suite: `16 passed, 1 skipped`.
+- Combined focused suite including registry and persistence schema:
+  `27 passed, 1 skipped`.
+- Full regression: `91 passed, 18 skipped`.
+- Ruff: clean. Mypy: clean across 20 source files.
+- The skipped live PostgreSQL tests remain unverified and are not counted as
+  successful database runs.
