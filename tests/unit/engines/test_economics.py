@@ -97,3 +97,17 @@ def test_negative_financial_inputs_are_rejected() -> None:
             variable_operations_cost=Decimal("60"),
             delivered_orders=10,
         )
+
+
+def test_negative_delivered_orders_are_rejected() -> None:
+    with pytest.raises(ValidationError):
+        EconomicsInput(
+            collected_revenue=Decimal("1000"),
+            product_cost=Decimal("300"),
+            ad_spend=Decimal("200"),
+            shipping=Decimal("80"),
+            collection_fees=Decimal("20"),
+            return_cost=Decimal("40"),
+            variable_operations_cost=Decimal("60"),
+            delivered_orders=-1,
+        )
