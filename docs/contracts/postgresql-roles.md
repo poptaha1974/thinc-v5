@@ -59,10 +59,13 @@ Cluster-mutating rejection tests are restricted to the ephemeral PostgreSQL
 connection, their guard requires all of `GITHUB_ACTIONS=true`, `CI=true`,
 `THINC_TEST_DATABASE_DISPOSABLE=1`, and the workflow-only
 `THINC_DESTRUCTIVE_ROLE_TESTS=postgres16-github-actions-service-v1` token. It
-also requires loopback PostgreSQL URLs for the exact `thinc_migrator` and
-`postgres` identities, the same test-named database, and a read-only server
-check confirming PostgreSQL 16. Missing any condition skips the mutation tests
-before the first `ALTER ROLE` or `GRANT`.
+also requires canonical, query-free `postgresql+psycopg` URLs for the exact
+`thinc_migrator`, `thinc_app`, and `postgres` identities at the literal
+`localhost:5432/thinc_test` destination. Driver aliases, implicit ports,
+alternate loopback forms, encoded identities, and all query parameters are
+rejected before the provisioner connection opens. A subsequent read-only
+server check confirms PostgreSQL 16. Missing any condition skips the mutation
+tests before the first `ALTER ROLE` or `GRANT`.
 
 Positive live tests do not request a provisioner identity and remain runnable
 against any explicitly disposable test database satisfying the migration/app

@@ -11,6 +11,18 @@ from .conftest import (
     safe_downgrade,
 )
 
+EPHEMERAL_CI_SIGNALS = {
+    "GITHUB_ACTIONS": "true",
+    "CI": "true",
+    "THINC_DESTRUCTIVE_ROLE_TESTS": "postgres16-github-actions-service-v1",
+    "THINC_TEST_DATABASE_DISPOSABLE": "1",
+}
+WORKFLOW_DATABASE_URLS = (
+    "postgresql+psycopg://thinc_migrator:migration@localhost:5432/thinc_test",
+    "postgresql+psycopg://thinc_app:application@localhost:5432/thinc_test",
+    "postgresql+psycopg://postgres:postgres@localhost:5432/thinc_test",
+)
+
 
 def test_destructive_migrations_require_explicit_disposable_flag(
     monkeypatch: pytest.MonkeyPatch,
@@ -58,32 +70,127 @@ def test_safe_downgrade_refuses_non_disposable_effective_url(
         safe_downgrade(config)
 
 
-def test_test_database_name_alone_cannot_enable_role_mutations() -> None:
+@pytest.mark.parametrize("missing_signal", tuple(EPHEMERAL_CI_SIGNALS))
+def test_each_ephemeral_ci_signal_is_required_for_role_mutations(
+    missing_signal: str,
+) -> None:
+    incomplete_signals = {
+        key: value
+        for key, value in EPHEMERAL_CI_SIGNALS.items()
+        if key != missing_signal
+    }
+
     with pytest.raises(RuntimeError, match="ephemeral GitHub Actions"):
         _require_ephemeral_role_test_cluster(
-            "postgresql+psycopg://migrator@localhost/thinc_test",
-            "postgresql+psycopg://postgres@localhost/thinc_test",
-            {"THINC_TEST_DATABASE_DISPOSABLE": "1"},
+            *WORKFLOW_DATABASE_URLS,
+            incomplete_signals,
         )
 
 
-def test_destructive_role_token_alone_cannot_enable_role_mutations() -> None:
-    with pytest.raises(RuntimeError, match="ephemeral GitHub Actions"):
-        _require_ephemeral_role_test_cluster(
-            "postgresql+psycopg://migrator@localhost/thinc_test",
-            "postgresql+psycopg://postgres@localhost/thinc_test",
-            {"THINC_DESTRUCTIVE_ROLE_TESTS": ("postgres16-github-actions-service-v1")},
-        )
-
-
-def test_all_ephemeral_ci_signals_enable_role_mutations() -> None:
+@pytest.mark.parametrize(
+    "database_urls",
+    [
+        WORKFLOW_DATABASE_URLS,
+        (
+            "postgresql+psycopg://thinc_migrator@localhost:5432/thinc_test",
+            "postgresql+psycopg://thinc_app@localhost:5432/thinc_test",
+            "postgresql+psycopg://postgres@localhost:5432/thinc_test",
+        ),
+    ],
+    ids=["workflow-passwords", "external-password-source"],
+)
+def test_canonical_ephemeral_ci_urls_enable_role_mutations(
+    database_urls: tuple[str, str, str],
+) -> None:
     _require_ephemeral_role_test_cluster(
-        "postgresql+psycopg://thinc_migrator@localhost/thinc_test",
-        "postgresql+psycopg://postgres@localhost/thinc_test",
-        {
-            "GITHUB_ACTIONS": "true",
-            "CI": "true",
-            "THINC_DESTRUCTIVE_ROLE_TESTS": ("postgres16-github-actions-service-v1"),
-            "THINC_TEST_DATABASE_DISPOSABLE": "1",
-        },
+        *database_urls,
+        EPHEMERAL_CI_SIGNALS,
     )
+
+
+@pytest.mark.parametrize(
+    "url_index",
+    range(3),
+    ids=["migration", "app", "provisioner"],
+)
+def test_destructive_role_guard_rejects_query_destination_override(
+    url_index: int,
+) -> None:
+    database_urls = list(WORKFLOW_DATABASE_URLS)
+    database_urls[url_index] += (
+        "?host=shared.example&port=6432&dbname=production&user=postgres"
+    )
+    migration_url, app_url, provisioner_url = database_urls
+
+    with pytest.raises(RuntimeError, match="canonical query-free"):
+        _require_ephemeral_role_test_cluster(
+            migration_url,
+            app_url,
+            provisioner_url,
+            EPHEMERAL_CI_SIGNALS,
+        )
+
+
+@pytest.mark.parametrize(
+    ("url_index", "unsafe_url"),
+    [
+        (
+            0,
+            "postgresql://thinc_migrator:migration@localhost:5432/thinc_test",
+        ),
+        (
+            0,
+            "postgresql+psycopg://thinc_migrator:migration@localhost/thinc_test",
+        ),
+        (
+            0,
+            "postgresql+psycopg://thinc_migrator:migration@127.0.0.1:5432/thinc_test",
+        ),
+        (
+            0,
+            "postgresql+psycopg://thinc%5Fmigrator:migration@localhost:5432/thinc_test",
+        ),
+        (
+            0,
+            "postgresql+psycopg://thinc_migrator:migration@localhost:5432/another_test",
+        ),
+        (
+            1,
+            "postgresql+psycopg://thinc_migrator:application@localhost:5432/thinc_test",
+        ),
+        (
+            2,
+            "postgresql+psycopg://postgres:postgres@shared.example:5432/thinc_test",
+        ),
+        (
+            2,
+            "postgresql+psycopg://postgres:postgres@localhost:5432/thinc_test"
+            "?sslmode=disable",
+        ),
+    ],
+    ids=[
+        "driver-alias",
+        "implicit-port",
+        "loopback-alias",
+        "encoded-identity",
+        "alternate-test-database",
+        "wrong-app-identity",
+        "non-loopback-host",
+        "query-parameter",
+    ],
+)
+def test_destructive_role_guard_rejects_non_allowlisted_url_shapes(
+    url_index: int,
+    unsafe_url: str,
+) -> None:
+    database_urls = list(WORKFLOW_DATABASE_URLS)
+    database_urls[url_index] = unsafe_url
+    migration_url, app_url, provisioner_url = database_urls
+
+    with pytest.raises(RuntimeError, match="canonical query-free"):
+        _require_ephemeral_role_test_cluster(
+            migration_url,
+            app_url,
+            provisioner_url,
+            EPHEMERAL_CI_SIGNALS,
+        )

@@ -9,6 +9,7 @@ import pytest
 from alembic.config import Config
 from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError
 
 from alembic import command
 from thinc_v5.db.migration_config import configure_alembic_url
@@ -69,12 +70,8 @@ def provisioner_url(database_urls: tuple[str, str]) -> str:
         pytest.skip(
             "THINC_TEST_PROVISIONER_DATABASE_URL is required for role rejection tests"
         )
-    if not make_url(url).drivername.startswith("postgresql"):
-        pytest.fail("THINC_TEST_PROVISIONER_DATABASE_URL must point to PostgreSQL")
-    if make_url(url).database != make_url(database_urls[0]).database:
-        pytest.fail("provisioner and migration URLs must point to the same database")
     try:
-        _require_ephemeral_role_test_cluster(database_urls[0], url)
+        _require_ephemeral_role_test_cluster(*database_urls, url)
         _require_postgresql_16_provisioner(url)
     except RuntimeError as error:
         pytest.skip(str(error))
@@ -114,7 +111,8 @@ def _require_disposable_database(database_url: str) -> None:
 
 
 def _require_ephemeral_role_test_cluster(
-    database_url: str,
+    migration_url: str,
+    app_url: str,
     provisioner_url: str,
     environ: Mapping[str, str] = os.environ,
 ) -> None:
@@ -130,27 +128,39 @@ def _require_ephemeral_role_test_cluster(
             "PostgreSQL 16 service"
         )
 
-    migration = make_url(database_url)
-    provisioner = make_url(provisioner_url)
-    loopback_hosts = {"localhost", "127.0.0.1", "::1"}
-    safe_shape = (
-        migration.drivername.startswith("postgresql")
-        and provisioner.drivername.startswith("postgresql")
-        and migration.host in loopback_hosts
-        and provisioner.host in loopback_hosts
-        and migration.port in (None, 5432)
-        and provisioner.port in (None, 5432)
-        and migration.username == "thinc_migrator"
-        and provisioner.username == "postgres"
-        and migration.database == provisioner.database
-        and migration.database is not None
-        and "test" in migration.database.lower()
+    url_contracts = (
+        (migration_url, "thinc_migrator"),
+        (app_url, "thinc_app"),
+        (provisioner_url, "postgres"),
     )
-    if not safe_shape:
+    if any(
+        not _is_canonical_destructive_role_url(url, username)
+        for url, username in url_contracts
+    ):
         raise RuntimeError(
-            "destructive role tests require loopback PostgreSQL test URLs "
-            "for thinc_migrator and postgres"
+            "destructive role tests require canonical query-free "
+            "postgresql+psycopg URLs for thinc_migrator, thinc_app, and "
+            "postgres at localhost:5432/thinc_test"
         )
+
+
+def _is_canonical_destructive_role_url(
+    database_url: str,
+    expected_username: str,
+) -> bool:
+    try:
+        parsed_url = make_url(database_url)
+        return (
+            parsed_url.render_as_string(hide_password=False) == database_url
+            and parsed_url.drivername == "postgresql+psycopg"
+            and not parsed_url.query
+            and parsed_url.username == expected_username
+            and parsed_url.host == "localhost"
+            and parsed_url.port == 5432
+            and parsed_url.database == "thinc_test"
+        )
+    except (ArgumentError, ValueError):
+        return False
 
 
 def _require_postgresql_16_provisioner(provisioner_url: str) -> None:
