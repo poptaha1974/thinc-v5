@@ -5,7 +5,7 @@ import json
 import time
 from collections.abc import Callable, Sequence
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from threading import Condition, Event, RLock, Thread
 from typing import Any, Literal, Protocol, cast
@@ -18,7 +18,10 @@ from sqlalchemy.sql import Select
 
 from thinc_v5.db.models import (
     AssessmentRecord,
+    AuditEvent,
+    DecisionRecord,
     EngineOutputRecord,
+    EvidenceRecord,
     HumanApprovalRecord,
 )
 from thinc_v5.db.session import set_tenant_context
@@ -98,6 +101,53 @@ class StoredEngineOutput:
 
 
 @dataclass(frozen=True)
+class StoredEvidenceRecord:
+    record_id: UUID
+    source_id: str
+    raw_payload: dict[str, Any]
+    normalized_payload: dict[str, Any]
+    raw_payload_hash: str
+    normalized_payload_hash: str
+    provenance: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class StoredDecisionRecord:
+    record_id: UUID
+    requested_decision: str
+    recommended_decision: str
+    gate_reasons: tuple[dict[str, Any], ...]
+    decision_hash: str
+    provenance: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class StoredAuditEvent:
+    record_id: UUID
+    actor_id: str
+    action: str
+    entity_type: str
+    entity_id: str
+    payload: dict[str, Any]
+    integrity_hash: str
+
+
+@dataclass(frozen=True)
+class AssessmentCompletion:
+    response: AssessmentResponse
+    evidence: StoredEvidenceRecord
+    decision: StoredDecisionRecord
+    audit_event: StoredAuditEvent
+
+
+@dataclass(frozen=True)
+class GovernanceRecords:
+    evidence_records: tuple[StoredEvidenceRecord, ...]
+    decision_records: tuple[StoredDecisionRecord, ...]
+    audit_events: tuple[StoredAuditEvent, ...]
+
+
+@dataclass(frozen=True)
 class AssessmentReservation:
     assessment_id: str
     owner_token: str
@@ -121,6 +171,7 @@ class _MemoryReservation:
 class StoredApproval:
     request_hash: str
     approval: HumanApproval
+    record_id: UUID = field(default_factory=uuid4)
 
 
 class AssessmentRepository(Protocol):
@@ -141,7 +192,7 @@ class AssessmentRepository(Protocol):
         idempotency_key: str,
         request_hash: str,
         reservation: AssessmentReservation,
-        response: AssessmentResponse,
+        completion: AssessmentCompletion,
     ) -> None: ...
 
     def renew_assessment(
@@ -187,6 +238,7 @@ class AssessmentRepository(Protocol):
         tenant_id: UUID,
         idempotency_key: str,
         stored: StoredApproval,
+        audit_event: StoredAuditEvent,
     ) -> StoredApproval: ...
 
     def get_approval_by_idempotency_key(
@@ -194,6 +246,8 @@ class AssessmentRepository(Protocol):
         tenant_id: UUID,
         idempotency_key: str,
     ) -> StoredApproval | None: ...
+
+    def get_governance_records(self, tenant_id: UUID) -> GovernanceRecords: ...
 
 
 class InMemoryAssessmentRepository:
@@ -221,6 +275,10 @@ class InMemoryAssessmentRepository:
         self._approvals: dict[tuple[UUID, str], StoredApproval] = {}
         self._approval_idempotency: dict[tuple[UUID, str], StoredApproval] = {}
         self._engine_outputs: dict[tuple[UUID, str, str], StoredEngineOutput] = {}
+        self._assessment_hashes: dict[tuple[UUID, str], str] = {}
+        self._evidence_records: dict[tuple[UUID, UUID], StoredEvidenceRecord] = {}
+        self._decision_records: dict[tuple[UUID, UUID], StoredDecisionRecord] = {}
+        self._audit_events: dict[tuple[UUID, UUID], StoredAuditEvent] = {}
 
     @property
     def heartbeat_interval_seconds(self) -> float:
@@ -260,6 +318,15 @@ class InMemoryAssessmentRepository:
                 if stored.request_hash != request_hash:
                     raise IdempotencyConflict
                 if stored.state == "COMPLETED":
+                    if stored.response is None:
+                        raise ReservationStateError(
+                            "completed reservation has no response"
+                        )
+                    _require_json_hash(
+                        stored.response.model_dump(mode="json"),
+                        self._assessment_hashes[(tenant_id, stored.assessment_id)],
+                        "assessment hash",
+                    )
                     return _memory_reservation(stored, execute=False)
                 if stored.state == "FAILED" or stored.lease_expires_at <= datetime.now(
                     UTC
@@ -295,15 +362,46 @@ class InMemoryAssessmentRepository:
         idempotency_key: str,
         request_hash: str,
         reservation: AssessmentReservation,
-        response: AssessmentResponse,
+        completion: AssessmentCompletion,
     ) -> None:
+        _validate_completion_integrity(completion)
         key = (tenant_id, idempotency_key)
         with self._condition:
             stored = self._reservations[key]
             _require_reservation_owner(stored, request_hash, reservation)
+            response = completion.response
+            if response.assessment_id != reservation.assessment_id:
+                raise ReservationStateError(
+                    "completion assessment ID does not match reservation"
+                )
+            _validate_actor_id(completion.audit_event.actor_id)
+            evidence_key = (tenant_id, completion.evidence.record_id)
+            decision_key = (tenant_id, completion.decision.record_id)
+            audit_key = (tenant_id, completion.audit_event.record_id)
+            if (
+                evidence_key in self._evidence_records
+                or decision_key in self._decision_records
+                or audit_key in self._audit_events
+            ):
+                raise IdempotencyConflict
+            evidence_records = dict(self._evidence_records)
+            decision_records = dict(self._decision_records)
+            audit_events = dict(self._audit_events)
+            assessment_hashes = dict(self._assessment_hashes)
+            by_id = dict(self._by_id)
+            evidence_records[evidence_key] = deepcopy(completion.evidence)
+            decision_records[decision_key] = deepcopy(completion.decision)
+            audit_events[audit_key] = deepcopy(completion.audit_event)
+            response_hash = _json_hash(response.model_dump(mode="json"))
+            assessment_hashes[(tenant_id, response.assessment_id)] = response_hash
+            by_id[(tenant_id, response.assessment_id)] = deepcopy(response)
+            self._evidence_records = evidence_records
+            self._decision_records = decision_records
+            self._audit_events = audit_events
+            self._assessment_hashes = assessment_hashes
+            self._by_id = by_id
             stored.state = "COMPLETED"
             stored.response = deepcopy(response)
-            self._by_id[(tenant_id, response.assessment_id)] = deepcopy(response)
             self._condition.notify_all()
 
     def fail_assessment(
@@ -355,8 +453,22 @@ class InMemoryAssessmentRepository:
                 reservation,
             )
             return deepcopy(
-                self._engine_outputs.get((tenant_id, assessment_id, engine_name))
+                self._verified_engine_output(
+                    self._engine_outputs.get((tenant_id, assessment_id, engine_name))
+                )
             )
+
+    @staticmethod
+    def _verified_engine_output(
+        stored: StoredEngineOutput | None,
+    ) -> StoredEngineOutput | None:
+        if stored is not None:
+            _require_json_hash(
+                stored.output,
+                stored.output_hash,
+                "engine output hash",
+            )
+        return stored
 
     def get_assessment(
         self,
@@ -364,14 +476,25 @@ class InMemoryAssessmentRepository:
         assessment_id: str,
     ) -> AssessmentResponse | None:
         with self._lock:
-            return deepcopy(self._by_id.get((tenant_id, assessment_id)))
+            response = self._by_id.get((tenant_id, assessment_id))
+            if response is None:
+                return None
+            _require_json_hash(
+                response.model_dump(mode="json"),
+                self._assessment_hashes[(tenant_id, assessment_id)],
+                "assessment hash",
+            )
+            return deepcopy(response)
 
     def save_approval(
         self,
         tenant_id: UUID,
         idempotency_key: str,
         stored: StoredApproval,
+        audit_event: StoredAuditEvent,
     ) -> StoredApproval:
+        _validate_audit_integrity(audit_event)
+        _validate_actor_id(audit_event.actor_id)
         with self._lock:
             approval = stored.approval
             if (tenant_id, approval.assessment_id) not in self._by_id:
@@ -380,9 +503,19 @@ class InMemoryAssessmentRepository:
             prior = self._approval_idempotency.get(idempotency_key_with_tenant)
             if prior is not None:
                 return deepcopy(prior)
+            audit_key = (tenant_id, audit_event.record_id)
+            if audit_key in self._audit_events:
+                raise IdempotencyConflict
             copied = deepcopy(stored)
-            self._approval_idempotency[idempotency_key_with_tenant] = copied
-            self._approvals[(tenant_id, approval.assessment_id)] = copied
+            approval_idempotency = dict(self._approval_idempotency)
+            approvals = dict(self._approvals)
+            audit_events = dict(self._audit_events)
+            approval_idempotency[idempotency_key_with_tenant] = copied
+            approvals[(tenant_id, approval.assessment_id)] = copied
+            audit_events[audit_key] = deepcopy(audit_event)
+            self._approval_idempotency = approval_idempotency
+            self._approvals = approvals
+            self._audit_events = audit_events
             return deepcopy(copied)
 
     def get_approval_by_idempotency_key(
@@ -393,6 +526,26 @@ class InMemoryAssessmentRepository:
         with self._lock:
             return deepcopy(
                 self._approval_idempotency.get((tenant_id, idempotency_key))
+            )
+
+    def get_governance_records(self, tenant_id: UUID) -> GovernanceRecords:
+        with self._lock:
+            return GovernanceRecords(
+                evidence_records=tuple(
+                    deepcopy(record)
+                    for (record_tenant, _), record in self._evidence_records.items()
+                    if record_tenant == tenant_id
+                ),
+                decision_records=tuple(
+                    deepcopy(record)
+                    for (record_tenant, _), record in self._decision_records.items()
+                    if record_tenant == tenant_id
+                ),
+                audit_events=tuple(
+                    deepcopy(record)
+                    for (record_tenant, _), record in self._audit_events.items()
+                    if record_tenant == tenant_id
+                ),
             )
 
 
@@ -447,6 +600,7 @@ class SqlAlchemyAssessmentRepository:
                     select(
                         AssessmentRecord.domain_assessment_id,
                         AssessmentRecord.assessment,
+                        AssessmentRecord.assessment_hash,
                         (AssessmentRecord.lease_expires_at > _database_clock()).label(
                             "lease_active"
                         ),
@@ -489,6 +643,11 @@ class SqlAlchemyAssessmentRepository:
                 if payload["request_hash"] != request_hash:
                     raise IdempotencyConflict
                 if payload["state"] == "COMPLETED":
+                    _require_json_hash(
+                        payload["response"],
+                        row.assessment_hash,
+                        "assessment hash",
+                    )
                     return AssessmentReservation(
                         assessment_id=assessment_id,
                         owner_token=str(uuid4()),
@@ -568,8 +727,9 @@ class SqlAlchemyAssessmentRepository:
         idempotency_key: str,
         request_hash: str,
         reservation: AssessmentReservation,
-        response: AssessmentResponse,
+        completion: AssessmentCompletion,
     ) -> None:
+        _validate_completion_integrity(completion)
         with self._engine.begin() as connection:
             set_tenant_context(connection, tenant_id)
             _lock_idempotency_key(connection, tenant_id, idempotency_key)
@@ -584,6 +744,61 @@ class SqlAlchemyAssessmentRepository:
                 lease_active,
                 request_hash,
                 reservation,
+            )
+            response = completion.response
+            if response.assessment_id != reservation.assessment_id:
+                raise ReservationStateError(
+                    "completion assessment ID does not match reservation"
+                )
+            assessment_record_id = connection.execute(
+                select(AssessmentRecord.id).where(
+                    AssessmentRecord.tenant_id == tenant_id,
+                    AssessmentRecord.idempotency_key == idempotency_key,
+                )
+            ).scalar_one()
+            connection.execute(
+                insert(EvidenceRecord).values(
+                    id=completion.evidence.record_id,
+                    tenant_id=tenant_id,
+                    source_id=completion.evidence.source_id,
+                    raw_payload=completion.evidence.raw_payload,
+                    normalized_payload=completion.evidence.normalized_payload,
+                    raw_payload_hash=completion.evidence.raw_payload_hash,
+                    normalized_payload_hash=(
+                        completion.evidence.normalized_payload_hash
+                    ),
+                    provenance=completion.evidence.provenance,
+                )
+            )
+            connection.execute(
+                insert(DecisionRecord).values(
+                    id=completion.decision.record_id,
+                    tenant_id=tenant_id,
+                    assessment_id=assessment_record_id,
+                    decision=completion.decision.recommended_decision,
+                    reasons={
+                        "requested_decision": (completion.decision.requested_decision),
+                        "recommended_decision": (
+                            completion.decision.recommended_decision
+                        ),
+                        "gate_reasons": list(completion.decision.gate_reasons),
+                    },
+                    decision_hash=completion.decision.decision_hash,
+                    provenance=completion.decision.provenance,
+                )
+            )
+            connection.execute(
+                insert(AuditEvent).values(
+                    id=completion.audit_event.record_id,
+                    tenant_id=tenant_id,
+                    actor_id=completion.audit_event.actor_id,
+                    event_type=completion.audit_event.action,
+                    entity_type=completion.audit_event.entity_type,
+                    entity_id=completion.audit_event.entity_id,
+                    payload=completion.audit_event.payload,
+                    integrity_hash=completion.audit_event.integrity_hash,
+                    previous_event_hash=None,
+                )
             )
             response_payload = response.model_dump(mode="json")
             connection.execute(
@@ -713,6 +928,11 @@ class SqlAlchemyAssessmentRepository:
             ).one_or_none()
             if row is None:
                 return None
+            _require_json_hash(
+                row.output,
+                row.output_hash,
+                "engine output hash",
+            )
             return StoredEngineOutput(
                 engine_name=engine_name,
                 output=row.output,
@@ -727,16 +947,25 @@ class SqlAlchemyAssessmentRepository:
     ) -> AssessmentResponse | None:
         with self._engine.begin() as connection:
             set_tenant_context(connection, tenant_id)
-            payload = connection.execute(
-                select(AssessmentRecord.assessment).where(
+            row = connection.execute(
+                select(
+                    AssessmentRecord.assessment,
+                    AssessmentRecord.assessment_hash,
+                ).where(
                     AssessmentRecord.tenant_id == tenant_id,
                     AssessmentRecord.domain_assessment_id == assessment_id,
                 )
-            ).scalar_one_or_none()
-            if payload is None:
+            ).one_or_none()
+            if row is None:
                 return None
+            payload = row.assessment
             if payload.get("state") != "COMPLETED":
                 return None
+            _require_json_hash(
+                payload["response"],
+                row.assessment_hash,
+                "assessment hash",
+            )
             return AssessmentResponse.model_validate(payload["response"])
 
     def save_approval(
@@ -744,7 +973,9 @@ class SqlAlchemyAssessmentRepository:
         tenant_id: UUID,
         idempotency_key: str,
         stored: StoredApproval,
+        audit_event: StoredAuditEvent,
     ) -> StoredApproval:
+        _validate_audit_integrity(audit_event)
         with self._engine.begin() as connection:
             set_tenant_context(connection, tenant_id)
             _lock_idempotency_key(connection, tenant_id, idempotency_key)
@@ -767,13 +998,26 @@ class SqlAlchemyAssessmentRepository:
                 raise AssessmentNotFound(stored.approval.assessment_id)
             connection.execute(
                 insert(HumanApprovalRecord).values(
-                    id=uuid4(),
+                    id=stored.record_id,
                     tenant_id=tenant_id,
                     assessment_id=assessment_record_id,
                     approver_id=stored.approval.approver_id,
                     approved_at=stored.approval.approved_at,
                     idempotency_key=idempotency_key,
                     approval_hash=stored.request_hash,
+                )
+            )
+            connection.execute(
+                insert(AuditEvent).values(
+                    id=audit_event.record_id,
+                    tenant_id=tenant_id,
+                    actor_id=audit_event.actor_id,
+                    event_type=audit_event.action,
+                    entity_type=audit_event.entity_type,
+                    entity_id=audit_event.entity_id,
+                    payload=audit_event.payload,
+                    integrity_hash=audit_event.integrity_hash,
+                    previous_event_hash=None,
                 )
             )
             return stored
@@ -793,6 +1037,73 @@ class SqlAlchemyAssessmentRepository:
             ).one_or_none()
             return _stored_approval(record) if record is not None else None
 
+    def get_governance_records(self, tenant_id: UUID) -> GovernanceRecords:
+        with self._engine.begin() as connection:
+            set_tenant_context(connection, tenant_id)
+            evidence_rows = connection.execute(
+                select(
+                    EvidenceRecord.id,
+                    EvidenceRecord.source_id,
+                    EvidenceRecord.raw_payload,
+                    EvidenceRecord.normalized_payload,
+                    EvidenceRecord.raw_payload_hash,
+                    EvidenceRecord.normalized_payload_hash,
+                    EvidenceRecord.provenance,
+                ).where(EvidenceRecord.tenant_id == tenant_id)
+            ).all()
+            decision_rows = connection.execute(
+                select(
+                    DecisionRecord.id,
+                    DecisionRecord.decision,
+                    DecisionRecord.reasons,
+                    DecisionRecord.decision_hash,
+                    DecisionRecord.provenance,
+                ).where(DecisionRecord.tenant_id == tenant_id)
+            ).all()
+            audit_rows = connection.execute(
+                select(
+                    AuditEvent.id,
+                    AuditEvent.actor_id,
+                    AuditEvent.event_type,
+                    AuditEvent.entity_type,
+                    AuditEvent.entity_id,
+                    AuditEvent.payload,
+                    AuditEvent.integrity_hash,
+                )
+                .where(AuditEvent.tenant_id == tenant_id)
+                .order_by(AuditEvent.occurred_at, AuditEvent.id)
+            ).all()
+
+        return GovernanceRecords(
+            evidence_records=tuple(
+                StoredEvidenceRecord(
+                    record_id=row.id,
+                    source_id=row.source_id,
+                    raw_payload=row.raw_payload,
+                    normalized_payload=row.normalized_payload,
+                    raw_payload_hash=row.raw_payload_hash,
+                    normalized_payload_hash=row.normalized_payload_hash,
+                    provenance=row.provenance,
+                )
+                for row in evidence_rows
+            ),
+            decision_records=tuple(
+                _stored_decision_record(row) for row in decision_rows
+            ),
+            audit_events=tuple(
+                StoredAuditEvent(
+                    record_id=row.id,
+                    actor_id=row.actor_id,
+                    action=row.event_type,
+                    entity_type=row.entity_type,
+                    entity_id=row.entity_id,
+                    payload=row.payload,
+                    integrity_hash=row.integrity_hash,
+                )
+                for row in audit_rows
+            ),
+        )
+
 
 class AssessmentNotFound(Exception):
     def __init__(self, assessment_id: str) -> None:
@@ -805,6 +1116,10 @@ class IdempotencyConflict(Exception):
 
 
 class ReservationStateError(RuntimeError):
+    pass
+
+
+class PersistenceIntegrityError(RuntimeError):
     pass
 
 
@@ -824,7 +1139,6 @@ class AssessmentService:
         idempotency_key: str,
         request: AssessmentInput,
     ) -> AssessmentResponse:
-        del actor_id  # Reserved for the durable audit adapter.
         request_hash = _model_hash(request)
         reservation = self._repository.reserve_assessment(
             tenant_id,
@@ -924,7 +1238,7 @@ class AssessmentService:
                 idempotency_key,
                 request_hash,
                 reservation,
-                response,
+                _assessment_completion(request, response, actor_id),
             )
             return response
         except Exception:
@@ -974,7 +1288,7 @@ class AssessmentService:
         stored = self._repository.save_approval(
             tenant_id,
             idempotency_key,
-            StoredApproval(
+            stored_approval := StoredApproval(
                 request_hash=request_hash,
                 approval=HumanApproval(
                     approver_id=approver_id,
@@ -982,6 +1296,7 @@ class AssessmentService:
                     assessment_id=assessment_id,
                 ),
             ),
+            _approval_audit_event(stored_approval),
         )
         if stored.request_hash != request_hash:
             raise IdempotencyConflict
@@ -1027,6 +1342,171 @@ def _json_hash(payload: object) -> str:
         separators=(",", ":"),
     )
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _assessment_completion(
+    request: AssessmentInput,
+    response: AssessmentResponse,
+    actor_id: str,
+) -> AssessmentCompletion:
+    evidence_record_id = uuid4()
+    decision_record_id = uuid4()
+    economics_payload = request.economics.model_dump(mode="json")
+    provenance = request.provenance.model_dump(mode="json")
+    evidence = StoredEvidenceRecord(
+        record_id=evidence_record_id,
+        source_id=request.provenance.source_ids[0],
+        raw_payload=economics_payload,
+        normalized_payload=economics_payload,
+        raw_payload_hash=_json_hash(economics_payload),
+        normalized_payload_hash=_json_hash(economics_payload),
+        provenance=provenance,
+    )
+    gate_reasons = tuple(
+        result.model_dump(mode="json") for result in response.data.gate_results
+    )
+    recommended_decision = _recommended_decision(
+        request.requested_decision,
+        response.data.gate_results,
+    )
+    decision_payload = {
+        "requested_decision": request.requested_decision.value,
+        "recommended_decision": recommended_decision.value,
+        "gate_reasons": list(gate_reasons),
+    }
+    decision = StoredDecisionRecord(
+        record_id=decision_record_id,
+        requested_decision=request.requested_decision.value,
+        recommended_decision=recommended_decision.value,
+        gate_reasons=gate_reasons,
+        decision_hash=_json_hash(decision_payload),
+        provenance=provenance,
+    )
+    audit_payload = {
+        "assessment_id": response.assessment_id,
+        "decision_record_id": str(decision_record_id),
+        "evidence_record_id": str(evidence_record_id),
+    }
+    audit_event = _new_audit_event(
+        actor_id=actor_id,
+        action="assessment.created",
+        entity_type="assessment",
+        entity_id=response.assessment_id,
+        payload=audit_payload,
+    )
+    return AssessmentCompletion(
+        response=response,
+        evidence=evidence,
+        decision=decision,
+        audit_event=audit_event,
+    )
+
+
+def _approval_audit_event(stored: StoredApproval) -> StoredAuditEvent:
+    approval = stored.approval
+    return _new_audit_event(
+        actor_id=approval.approver_id,
+        action="assessment.approved",
+        entity_type="human_approval",
+        entity_id=str(stored.record_id),
+        payload={
+            "approval_record_id": str(stored.record_id),
+            "assessment_id": approval.assessment_id,
+            "approver_id": approval.approver_id,
+        },
+    )
+
+
+def _new_audit_event(
+    *,
+    actor_id: str,
+    action: str,
+    entity_type: str,
+    entity_id: str,
+    payload: dict[str, Any],
+) -> StoredAuditEvent:
+    record_id = uuid4()
+    event_without_hash = {
+        "record_id": str(record_id),
+        "actor_id": actor_id,
+        "action": action,
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        "payload": payload,
+    }
+    return StoredAuditEvent(
+        record_id=record_id,
+        actor_id=actor_id,
+        action=action,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        payload=payload,
+        integrity_hash=_json_hash(event_without_hash),
+    )
+
+
+def _recommended_decision(
+    requested_decision: Decision,
+    gate_results: tuple[GateResult, ...],
+) -> Decision:
+    if any(result.blocks_decision and not result.passed for result in gate_results):
+        return Decision.HOLD
+    return requested_decision
+
+
+def _validate_completion_integrity(completion: AssessmentCompletion) -> None:
+    _require_json_hash(
+        completion.evidence.raw_payload,
+        completion.evidence.raw_payload_hash,
+        "evidence raw payload hash",
+    )
+    _require_json_hash(
+        completion.evidence.normalized_payload,
+        completion.evidence.normalized_payload_hash,
+        "evidence normalized payload hash",
+    )
+    decision_payload = {
+        "requested_decision": completion.decision.requested_decision,
+        "recommended_decision": completion.decision.recommended_decision,
+        "gate_reasons": list(completion.decision.gate_reasons),
+    }
+    _require_json_hash(
+        decision_payload,
+        completion.decision.decision_hash,
+        "decision hash",
+    )
+    expected_audit_payload = {
+        "assessment_id": completion.response.assessment_id,
+        "decision_record_id": str(completion.decision.record_id),
+        "evidence_record_id": str(completion.evidence.record_id),
+    }
+    if completion.audit_event.payload != expected_audit_payload:
+        raise PersistenceIntegrityError("assessment audit entity IDs do not match")
+    _validate_audit_integrity(completion.audit_event)
+
+
+def _validate_audit_integrity(audit_event: StoredAuditEvent) -> None:
+    payload = {
+        "record_id": str(audit_event.record_id),
+        "actor_id": audit_event.actor_id,
+        "action": audit_event.action,
+        "entity_type": audit_event.entity_type,
+        "entity_id": audit_event.entity_id,
+        "payload": audit_event.payload,
+    }
+    _require_json_hash(payload, audit_event.integrity_hash, "audit event hash")
+
+
+def _validate_actor_id(actor_id: str) -> None:
+    if not actor_id.strip():
+        raise ValueError("actor_id must not be blank")
+    if len(actor_id) > 255:
+        raise ValueError("actor_id must not exceed 255 characters")
+
+
+def _require_json_hash(payload: object, expected_hash: str, label: str) -> None:
+    if _json_hash(payload) != expected_hash:
+        raise PersistenceIntegrityError(f"{label} mismatch")
 
 
 def _memory_reservation(
@@ -1232,11 +1712,13 @@ def _stored_approval(record: Row[Any]) -> StoredApproval:
             approved_at=record.approved_at,
             assessment_id=record.domain_assessment_id,
         ),
+        record_id=record.id,
     )
 
 
-def _approval_select() -> Select[tuple[str, str, datetime, str]]:
+def _approval_select() -> Select[tuple[UUID, str, str, datetime, str]]:
     return select(
+        HumanApprovalRecord.id,
         HumanApprovalRecord.approval_hash,
         HumanApprovalRecord.approver_id,
         HumanApprovalRecord.approved_at,
@@ -1245,6 +1727,29 @@ def _approval_select() -> Select[tuple[str, str, datetime, str]]:
         AssessmentRecord,
         (AssessmentRecord.tenant_id == HumanApprovalRecord.tenant_id)
         & (AssessmentRecord.id == HumanApprovalRecord.assessment_id),
+    )
+
+
+def _stored_decision_record(record: Row[Any]) -> StoredDecisionRecord:
+    reasons = cast(dict[str, Any], record.reasons)
+    requested_decision = str(reasons.get("requested_decision", record.decision))
+    recommended_decision = str(reasons.get("recommended_decision", record.decision))
+    gate_reasons = tuple(
+        cast(dict[str, Any], reason) for reason in reasons.get("gate_reasons", [])
+    )
+    decision_payload = {
+        "requested_decision": requested_decision,
+        "recommended_decision": recommended_decision,
+        "gate_reasons": list(gate_reasons),
+    }
+    _require_json_hash(decision_payload, record.decision_hash, "decision hash")
+    return StoredDecisionRecord(
+        record_id=record.id,
+        requested_decision=requested_decision,
+        recommended_decision=recommended_decision,
+        gate_reasons=gate_reasons,
+        decision_hash=record.decision_hash,
+        provenance=record.provenance,
     )
 
 

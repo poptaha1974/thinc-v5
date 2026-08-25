@@ -33,7 +33,7 @@ provisioned.
 
 | Table | SELECT | INSERT | UPDATE | DELETE |
 | --- | --- | --- | --- | --- |
-| `tenants` | yes | no | no | no |
+| `tenants` (current tenant row only) | yes | no | no | no |
 | Evidence, assessment, decision, approval records | yes | yes | yes | yes |
 | `audit_events` | yes | yes | no | no |
 
@@ -44,9 +44,19 @@ even if privileges are changed later.
 ## Tenant session contract
 
 Call `thinc_v5.db.set_tenant_context` inside every database transaction that
-touches a tenant-owned table. It uses transaction-local PostgreSQL state, so
-the tenant value is cleared before a pooled connection can serve another
-transaction.
+touches tenant-scoped data, including the `tenants` table. It uses
+transaction-local PostgreSQL state, so the tenant value is cleared before a
+pooled connection can serve another transaction. `tenants` has its own forced
+RLS policy: `thinc_app` can select only the row whose `id` matches
+`app.tenant_id`, and it has no tenant insert, update, or delete grant.
+The table-owning migration identity has a separate management policy so
+explicit provisioning and migrations still work while forced RLS is enabled;
+that policy is not granted to `thinc_app`.
+
+The identity boundary already supplies the tenant UUID used for this context.
+Runtime bootstrap must not perform a global slug lookup through `thinc_app`;
+slug discovery belongs to a separate, explicitly authorized identity service
+outside Foundation.
 
 Destructive migration tests additionally require both test URLs, a database
 name containing `test`, and `THINC_TEST_DATABASE_DISPOSABLE=1`. Role rejection
@@ -72,7 +82,7 @@ against any explicitly disposable test database satisfying the migration/app
 role contract.
 
 The migration-cycle snapshot deliberately covers only THINC-owned database
-objects: the six THINC tables, their constraints/defaults/indexes/ownership,
+objects: the seven THINC tables, their constraints/defaults/indexes/ownership,
 RLS policies, the audit trigger and function, direct table grants, the direct
 `thinc_app` schema ACL, and the audit function ACL. It excludes unrelated
 cluster roles, databases, schemas, extensions, and objects owned by other

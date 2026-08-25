@@ -47,6 +47,7 @@ def test_app_role_has_only_effective_runtime_privileges(
         "tenants": (True, False, False, False, False, False, False),
         "evidence_records": (True, True, True, True, False, False, False),
         "assessment_records": (True, True, True, True, False, False, False),
+        "engine_output_records": (True, True, True, True, False, False, False),
         "decision_records": (True, True, True, True, False, False, False),
         "human_approval_records": (
             True,
@@ -199,6 +200,7 @@ def _insert_audit_event(
     tenant_id = uuid.uuid4()
     event_id = uuid.uuid4()
     with migrated_database.migration_engine.begin() as connection:
+        set_tenant_context(connection, tenant_id)
         connection.execute(
             text("INSERT INTO tenants (id, slug, name) VALUES (:id, :slug, :name)"),
             {"id": tenant_id, "slug": f"tenant-{tenant_id}", "name": "Tenant"},

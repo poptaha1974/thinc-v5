@@ -111,6 +111,9 @@ def test_datasheet_and_pilot_protocol_disclose_governance_constraints() -> None:
         "including Brier score.",
         "PR-AUC and ROC-AUC",
         "Decision-curve analysis",
+        "validated API representation, not the original HTTP bytes",
+        "same PostgreSQL transaction that marks the assessment `COMPLETED`",
+        "requested decision, safe recommended decision, and all seven gate reasons",
     ):
         assert phrase in datasheet
 
@@ -137,20 +140,20 @@ def test_release_checklist_and_readme_disclose_known_blockers() -> None:
         "thinc_v5.api.devserver:create_dev_app --factory --host 127.0.0.1 "
         "--port 8000"
     )
-    credential_pattern_prefix = (
-        "$pattern = "
-        "'(?i)\\b(?:api[_-]?key|client[_-]?secret|secret(?:[_-]?key)?|"
-        "access[_-]?token|refresh[_-]?token|password)\\b"
-    )
     exact_status_lines = (
         "Credential scan current status: PASSED "
-        "(literal-secret scan returned no matches on 2026-08-25).",
-        "Coverage current status: PASSED (90.13% on 2026-08-25 local full suite).",
+        "(environment assignments and URI credential scan returned no findings "
+        "on 2026-08-25).",
+        "Coverage current status: PASSED "
+        "(90.68%; 142 passed and 25 live PostgreSQL tests skipped on 2026-08-25).",
         "Bandit current status: PASSED "
         "(0 issues, 0 skipped on 2026-08-25 local Python 3.14.4 scan).",
         "pip-audit current status: PASSED "
         "(No known vulnerabilities found on 2026-08-25; local package "
         "`thinc-v5` was skipped because it is not published on PyPI).",
+        "Local pip check status: NOT PASSED "
+        "(the available Python 3.14 environment has dependencies outside the "
+        "Python 3.12 project constraints).",
         "Live PostgreSQL verification status: PENDING.",
         "Python 3.12 CI verification status: PENDING.",
         "Production authentication status: ABSENT.",
@@ -173,8 +176,9 @@ def test_release_checklist_and_readme_disclose_known_blockers() -> None:
     assert startup_command in readme
     assert "HeaderTestIdentityProvider" in readme
     assert "There is no `SCALE` endpoint." in readme
-    assert credential_pattern_prefix in readme
-    assert "git grep -nP -- \"$pattern\" -- . ':(exclude).env.example'" in readme
+    assert ".\\.venv\\Scripts\\python.exe scripts\\secret_scan.py" in readme
+    assert "InMemoryAssessmentRepository" in readme
+    assert "nonpersistent and does not connect to PostgreSQL" in readme
     assert "Synthetic test data cannot establish scientific performance." in readme
     assert (
         "Approval records do not recompute or mutate stored economics outputs or stored"

@@ -858,6 +858,7 @@
   "components": {
     "schemas": {
       "ApprovalInput": {
+        "additionalProperties": false,
         "properties": {
           "approved_at": {
             "anyOf": [

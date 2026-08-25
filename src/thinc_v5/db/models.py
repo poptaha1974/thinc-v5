@@ -27,6 +27,7 @@ BUSINESS_TABLE_NAMES = (
     "human_approval_records",
     "audit_events",
 )
+RLS_TABLE_NAMES = ("tenants", *BUSINESS_TABLE_NAMES)
 
 
 class IdMixin:
@@ -51,6 +52,8 @@ class CreatedAtMixin:
 
 
 class Tenant(IdMixin, CreatedAtMixin, Base):
+    """Tenant metadata visible to the matching transaction tenant only."""
+
     __tablename__ = "tenants"
 
     slug: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
@@ -153,7 +156,7 @@ class DecisionRecord(IdMixin, TenantOwnedMixin, CreatedAtMixin, Base):
         index=True,
     )
     decision: Mapped[str] = mapped_column(String(32), nullable=False)
-    reasons: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    reasons: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     decision_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     provenance: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
 
@@ -210,6 +213,7 @@ __all__ = [
     "EngineOutputRecord",
     "EvidenceRecord",
     "HumanApprovalRecord",
+    "RLS_TABLE_NAMES",
     "Tenant",
     "metadata",
 ]

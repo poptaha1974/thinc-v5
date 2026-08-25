@@ -25,6 +25,9 @@
 - Human approval is required for `SCALE`.
 - Approval records do not recompute stored economics outputs or stored gate
   results.
+- Assessment completion persists evidence, decision, and actor audit records in
+  one transaction; approval and its audit event are atomic as well.
+- Tenant metadata is protected by self-tenant RLS for the application role.
 
 ## Scientific Review Checklist
 
@@ -39,10 +42,11 @@
 
 ## Current Verification Status
 
-- Credential scan current status: PASSED (literal-secret scan returned no matches on 2026-08-25).
-- Coverage current status: PASSED (90.13% on 2026-08-25 local full suite).
+- Credential scan current status: PASSED (environment assignments and URI credential scan returned no findings on 2026-08-25).
+- Coverage current status: PASSED (90.68%; 142 passed and 25 live PostgreSQL tests skipped on 2026-08-25).
 - Bandit current status: PASSED (0 issues, 0 skipped on 2026-08-25 local Python 3.14.4 scan).
 - pip-audit current status: PASSED (No known vulnerabilities found on 2026-08-25; local package `thinc-v5` was skipped because it is not published on PyPI).
+- Local pip check status: NOT PASSED (the available Python 3.14 environment has dependencies outside the Python 3.12 project constraints).
 - Live PostgreSQL verification status: PENDING.
 - Python 3.12 CI verification status: PENDING.
 - Production authentication status: ABSENT.
@@ -50,7 +54,7 @@
 ## Release Blockers
 
 - Python 3.12 full CI verification remains pending:
-  `ruff format --check .`, `ruff check .`, `mypy src`,
+  `pip check`, `ruff format --check .`, `ruff check .`, `mypy src`,
   `pytest --cov=thinc_v5 --cov-fail-under=90`, `bandit -r src`,
   and `pip-audit`.
 - Live PostgreSQL verification remains pending, including live PostgreSQL tests.

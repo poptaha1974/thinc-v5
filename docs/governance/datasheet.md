@@ -6,6 +6,35 @@ This datasheet covers the Foundation release artifacts that support a
 Research Preview assessment workflow. The current implementation stores
 economics evidence, provenance metadata, gate outcomes, and human approvals.
 
+## Persistence Reality and Atomicity
+
+At the API boundary, `EconomicsInput` accepts only the documented economics
+fields. The evidence `raw_payload` is the validated API representation, not the original HTTP bytes;
+unknown request fields are not retained. The
+`normalized_payload` is the canonical JSON-ready representation of the same
+typed values. Foundation does not define fields for secrets or personal data,
+and neither audit payload stores the economics body.
+
+For PostgreSQL persistence, the evidence record, decision record, creation
+audit event, and final assessment response are written in the
+same PostgreSQL transaction that marks the assessment `COMPLETED`. If any governance write
+fails, that transaction rolls back and the reservation is marked `FAILED` in a
+separate recovery transaction. Engine outputs are intentionally durable before
+completion so a fenced retry can reuse verified work; they are not themselves
+evidence that an assessment completed.
+
+Each evidence row stores raw and normalized SHA-256 hashes plus the full
+source provenance block. Each decision row stores the
+requested decision, safe recommended decision, and all seven gate reasons. A blocking gate changes the
+safe recommendation to `HOLD`; it never executes that decision. Creation audit
+events store the actor ID and the assessment, evidence, and decision entity
+IDs. Approval and its audit event are also one atomic repository write.
+
+Assessment and engine-output hashes are verified when records are loaded. A
+mismatch fails closed rather than returning a response. The local devserver
+uses an in-memory, process-lifetime repository; it is not PostgreSQL-backed and
+is not durable.
+
 ## Delivered Profit Equation
 
 Delivered contribution profit is currently computed as:

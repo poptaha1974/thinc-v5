@@ -22,6 +22,7 @@ from thinc_v5.decision.service import (
     EngineRegistration,
     EngineRegistry,
     InMemoryAssessmentRepository,
+    PersistenceIntegrityError,
     ReservationStateError,
     SqlAlchemyAssessmentRepository,
     StoredEngineOutput,
@@ -495,7 +496,7 @@ def test_stale_owner_is_fenced_after_retry_takeover() -> None:
     output = StoredEngineOutput(
         engine_name="economics",
         output={"value": "winner"},
-        output_hash="sha256:winner",
+        output_hash=service_module._json_hash({"value": "winner"}),
         provenance=provenance,
     )
 
@@ -510,7 +511,7 @@ def test_stale_owner_is_fenced_after_retry_takeover() -> None:
     stale_output = StoredEngineOutput(
         engine_name="economics",
         output={"value": "stale"},
-        output_hash="sha256:stale",
+        output_hash=service_module._json_hash({"value": "stale"}),
         provenance=provenance,
     )
     with pytest.raises(ReservationStateError):
@@ -550,7 +551,11 @@ def test_stale_owner_is_fenced_after_retry_takeover() -> None:
             "fencing-key",
             request_hash,
             stale,
-            sample_response,
+            service_module._assessment_completion(
+                build_assessment_input(),
+                sample_response,
+                "researcher-1",
+            ),
         )
 
     assert (
@@ -561,4 +566,169 @@ def test_stale_owner_is_fenced_after_retry_takeover() -> None:
             "economics",
         )
         == output
+    )
+
+
+def test_create_persists_evidence_decision_and_actor_audit_atomically() -> None:
+    repository = InMemoryAssessmentRepository()
+    service = AssessmentService(repository)
+    tenant_id = UUID("11111111-1111-4111-8111-111111111111")
+    request = build_assessment_input()
+
+    response = service.create_assessment(
+        tenant_id=tenant_id,
+        actor_id="researcher-atomic",
+        idempotency_key="governance-create",
+        request=request,
+    )
+
+    snapshot = repository.get_governance_records(tenant_id)
+    assert len(snapshot.evidence_records) == 1
+    assert len(snapshot.decision_records) == 1
+    assert len(snapshot.audit_events) == 1
+    evidence = snapshot.evidence_records[0]
+    decision = snapshot.decision_records[0]
+    audit = snapshot.audit_events[0]
+    expected_economics = request.economics.model_dump(mode="json")
+    assert evidence.source_id == "source-1"
+    assert evidence.raw_payload == expected_economics
+    assert evidence.normalized_payload == expected_economics
+    assert evidence.raw_payload_hash.startswith("sha256:")
+    assert evidence.normalized_payload_hash.startswith("sha256:")
+    assert evidence.provenance == request.provenance.model_dump(mode="json")
+    assert decision.requested_decision == "RESEARCH"
+    assert decision.recommended_decision == "RESEARCH"
+    assert len(decision.gate_reasons) == 7
+    assert decision.provenance == request.provenance.model_dump(mode="json")
+    assert audit.actor_id == "researcher-atomic"
+    assert audit.action == "assessment.created"
+    assert audit.entity_type == "assessment"
+    assert audit.entity_id == response.assessment_id
+    assert audit.payload == {
+        "assessment_id": response.assessment_id,
+        "decision_record_id": str(decision.record_id),
+        "evidence_record_id": str(evidence.record_id),
+    }
+
+
+def test_completion_failure_leaves_no_completed_or_governance_records() -> None:
+    repository = InMemoryAssessmentRepository()
+    service = AssessmentService(repository)
+    tenant_id = UUID("11111111-1111-4111-8111-111111111111")
+
+    with pytest.raises(ValueError, match="actor_id must not exceed 255 characters"):
+        service.create_assessment(
+            tenant_id=tenant_id,
+            actor_id="x" * 256,
+            idempotency_key="governance-rollback",
+            request=build_assessment_input(),
+        )
+
+    assert repository.get_assessment(tenant_id, "does-not-matter") is None
+    snapshot = repository.get_governance_records(tenant_id)
+    assert snapshot.evidence_records == ()
+    assert snapshot.decision_records == ()
+    assert snapshot.audit_events == ()
+
+
+def test_approval_persists_actor_audit_in_same_repository_write() -> None:
+    repository = InMemoryAssessmentRepository()
+    service = AssessmentService(repository)
+    tenant_id = UUID("11111111-1111-4111-8111-111111111111")
+    created = service.create_assessment(
+        tenant_id=tenant_id,
+        actor_id="assessment-actor",
+        idempotency_key="approval-audit-create",
+        request=build_assessment_input(),
+    )
+
+    approval = service.approve_assessment(
+        tenant_id=tenant_id,
+        assessment_id=created.assessment_id,
+        approver_id="approval-actor",
+        idempotency_key="approval-audit-write",
+        approved_at=datetime(2026, 8, 25, 16, 0, tzinfo=UTC),
+    )
+
+    audit_events = repository.get_governance_records(tenant_id).audit_events
+    assert [event.action for event in audit_events] == [
+        "assessment.created",
+        "assessment.approved",
+    ]
+    approval_audit = audit_events[-1]
+    assert approval_audit.actor_id == "approval-actor"
+    assert approval_audit.entity_type == "human_approval"
+    assert approval_audit.payload["assessment_id"] == created.assessment_id
+    assert approval_audit.payload["approver_id"] == approval.approver_id
+
+
+def test_inmemory_engine_output_load_fails_closed_on_hash_mismatch() -> None:
+    repository = InMemoryAssessmentRepository()
+    tenant_id = UUID("11111111-1111-4111-8111-111111111111")
+    reservation = repository.reserve_assessment(
+        tenant_id,
+        "tampered-output",
+        "sha256:request",
+        {"source_ids": ["source-1"]},
+    )
+    repository.save_engine_output(
+        tenant_id,
+        reservation.assessment_id,
+        reservation,
+        StoredEngineOutput(
+            engine_name="economics",
+            output={"value": "tampered"},
+            output_hash="sha256:not-the-payload-hash",
+            provenance={"source_ids": ["source-1"]},
+        ),
+    )
+
+    with pytest.raises(PersistenceIntegrityError, match="engine output hash"):
+        repository.get_engine_output(
+            tenant_id,
+            reservation.assessment_id,
+            reservation,
+            "economics",
+        )
+
+
+def test_inmemory_assessment_load_fails_closed_on_hash_mismatch() -> None:
+    repository = InMemoryAssessmentRepository()
+    service = AssessmentService(repository)
+    tenant_id = UUID("11111111-1111-4111-8111-111111111111")
+    response = service.create_assessment(
+        tenant_id=tenant_id,
+        actor_id="researcher-1",
+        idempotency_key="tampered-assessment",
+        request=build_assessment_input(),
+    )
+    repository._by_id[(tenant_id, response.assessment_id)] = response.model_copy(
+        update={"decision_reasons": ["tampered"]}
+    )
+
+    with pytest.raises(PersistenceIntegrityError, match="assessment hash"):
+        repository.get_assessment(tenant_id, response.assessment_id)
+
+
+def test_blocked_requested_decision_is_recorded_with_safe_recommendation() -> None:
+    repository = InMemoryAssessmentRepository()
+    request = build_assessment_input().model_copy(
+        update={"requested_decision": service_module.Decision.SCALE}
+    )
+
+    AssessmentService(repository).create_assessment(
+        tenant_id=UUID("11111111-1111-4111-8111-111111111111"),
+        actor_id="researcher-1",
+        idempotency_key="blocked-recommendation",
+        request=request,
+    )
+
+    decision = repository.get_governance_records(
+        UUID("11111111-1111-4111-8111-111111111111")
+    ).decision_records[0]
+    assert decision.requested_decision == "SCALE"
+    assert decision.recommended_decision == "HOLD"
+    assert any(
+        reason["name"] == "HUMAN_APPROVAL" and not reason["passed"]
+        for reason in decision.gate_reasons
     )

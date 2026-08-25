@@ -6,9 +6,14 @@ from decimal import Decimal
 from types import SimpleNamespace
 from uuid import UUID
 
+import pytest
+
+import thinc_v5.decision.service as service_module
 from thinc_v5.decision.service import (
     AssessmentInput,
+    AssessmentReservation,
     AssessmentResponse,
+    PersistenceIntegrityError,
     SqlAlchemyAssessmentRepository,
 )
 from thinc_v5.domain.common import Provenance
@@ -21,15 +26,20 @@ class EmptyResult:
         *,
         row: object | None = None,
         scalar: object | None = None,
+        rows: list[object] | None = None,
     ) -> None:
         self._row = row
         self._scalar = scalar
+        self._rows = rows or []
 
     def one_or_none(self) -> object | None:
         return self._row
 
     def scalar_one_or_none(self) -> object | None:
         return self._scalar
+
+    def all(self) -> list[object]:
+        return self._rows
 
 
 class QueueConnection:
@@ -104,6 +114,7 @@ def test_sql_repository_returns_completed_reservation_response_without_execution
     None
 ):
     completed = build_completed_response()
+    response_payload = completed.model_dump(mode="json")
     engine = QueueEngine(
         [
             EmptyResult(),
@@ -115,8 +126,9 @@ def test_sql_repository_returns_completed_reservation_response_without_execution
                         "state": "COMPLETED",
                         "request_hash": "sha256:request",
                         "fencing_epoch": 4,
-                        "response": completed.model_dump(mode="json"),
+                        "response": response_payload,
                     },
+                    assessment_hash=service_module._json_hash(response_payload),
                     lease_active=True,
                 )
             ),
@@ -177,14 +189,18 @@ def test_sql_repository_reuses_failed_or_expired_assessment_id_for_retry() -> No
 
 def test_sql_repository_get_assessment_returns_completed_payload() -> None:
     completed = build_completed_response()
+    response_payload = completed.model_dump(mode="json")
     engine = QueueEngine(
         [
             EmptyResult(),
             EmptyResult(
-                scalar={
-                    "state": "COMPLETED",
-                    "response": completed.model_dump(mode="json"),
-                }
+                row=SimpleNamespace(
+                    assessment={
+                        "state": "COMPLETED",
+                        "response": response_payload,
+                    },
+                    assessment_hash=service_module._json_hash(response_payload),
+                )
             ),
         ]
     )
@@ -196,3 +212,149 @@ def test_sql_repository_get_assessment_returns_completed_payload() -> None:
     )
 
     assert loaded == completed
+
+
+def test_sql_repository_get_assessment_fails_closed_on_hash_mismatch() -> None:
+    completed = build_completed_response()
+    engine = QueueEngine(
+        [
+            EmptyResult(),
+            EmptyResult(
+                row=SimpleNamespace(
+                    assessment={
+                        "state": "COMPLETED",
+                        "response": completed.model_dump(mode="json"),
+                    },
+                    assessment_hash="sha256:tampered",
+                )
+            ),
+        ]
+    )
+    repository = SqlAlchemyAssessmentRepository(engine)  # type: ignore[arg-type]
+
+    with pytest.raises(PersistenceIntegrityError, match="assessment hash"):
+        repository.get_assessment(
+            UUID("11111111-1111-4111-8111-111111111111"),
+            completed.assessment_id,
+        )
+
+
+def test_sql_repository_get_engine_output_fails_closed_on_hash_mismatch() -> None:
+    assessment_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    reservation = AssessmentReservation(
+        assessment_id=assessment_id,
+        owner_token="owner-token",
+        fencing_epoch=2,
+        execute=True,
+    )
+    engine = QueueEngine(
+        [
+            EmptyResult(),
+            EmptyResult(scalar="idempotency-key"),
+            EmptyResult(),
+            EmptyResult(
+                row=SimpleNamespace(
+                    domain_assessment_id=assessment_id,
+                    assessment={
+                        "state": "PENDING",
+                        "request_hash": "sha256:request",
+                        "owner_token": reservation.owner_token,
+                        "fencing_epoch": reservation.fencing_epoch,
+                    },
+                    lease_active=True,
+                )
+            ),
+            EmptyResult(
+                row=SimpleNamespace(
+                    output={"value": "tampered"},
+                    output_hash="sha256:not-the-payload-hash",
+                    provenance={"source_ids": ["source-1"]},
+                )
+            ),
+        ]
+    )
+    repository = SqlAlchemyAssessmentRepository(engine)  # type: ignore[arg-type]
+
+    with pytest.raises(PersistenceIntegrityError, match="engine output hash"):
+        repository.get_engine_output(
+            UUID("11111111-1111-4111-8111-111111111111"),
+            assessment_id,
+            reservation,
+            "economics",
+        )
+
+
+def test_sql_repository_loads_tenant_governance_records() -> None:
+    evidence_id = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    decision_id = UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+    audit_id = UUID("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+    gate_reasons = [
+        {
+            "name": "COMPLIANCE",
+            "passed": True,
+            "blocks_decision": False,
+            "override_allowed": False,
+            "reason_code": "PASSED",
+            "reason": "Compliance gate passed.",
+        }
+    ]
+    decision_payload = {
+        "requested_decision": "RESEARCH",
+        "recommended_decision": "RESEARCH",
+        "gate_reasons": gate_reasons,
+    }
+    engine = QueueEngine(
+        [
+            EmptyResult(),
+            EmptyResult(
+                rows=[
+                    SimpleNamespace(
+                        id=evidence_id,
+                        source_id="source-1",
+                        raw_payload={"collected_revenue": "1000"},
+                        normalized_payload={"collected_revenue": "1000"},
+                        raw_payload_hash="sha256:raw",
+                        normalized_payload_hash="sha256:normalized",
+                        provenance={"source_ids": ["source-1"]},
+                    )
+                ]
+            ),
+            EmptyResult(
+                rows=[
+                    SimpleNamespace(
+                        id=decision_id,
+                        decision="RESEARCH",
+                        reasons=decision_payload,
+                        decision_hash=service_module._json_hash(decision_payload),
+                        provenance={"source_ids": ["source-1"]},
+                    )
+                ]
+            ),
+            EmptyResult(
+                rows=[
+                    SimpleNamespace(
+                        id=audit_id,
+                        actor_id="researcher-1",
+                        event_type="assessment.created",
+                        entity_type="assessment",
+                        entity_id="assessment-1",
+                        payload={"assessment_id": "assessment-1"},
+                        integrity_hash="sha256:audit",
+                    )
+                ]
+            ),
+        ]
+    )
+    repository = SqlAlchemyAssessmentRepository(engine)  # type: ignore[arg-type]
+
+    records = repository.get_governance_records(
+        UUID("11111111-1111-4111-8111-111111111111")
+    )
+
+    assert records.evidence_records[0].record_id == evidence_id
+    assert records.evidence_records[0].source_id == "source-1"
+    assert records.decision_records[0].record_id == decision_id
+    assert records.decision_records[0].requested_decision == "RESEARCH"
+    assert records.decision_records[0].gate_reasons == tuple(gate_reasons)
+    assert records.audit_events[0].record_id == audit_id
+    assert records.audit_events[0].action == "assessment.created"

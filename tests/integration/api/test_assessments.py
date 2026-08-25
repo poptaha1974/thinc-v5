@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi import Header
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import exc, text
 
 import thinc_v5.decision.service as service_module
 from tests.integration.db.conftest import MigratedDatabase
@@ -18,6 +18,7 @@ from thinc_v5.api.app import create_app
 from thinc_v5.db.session import set_tenant_context
 from thinc_v5.decision.service import (
     AssessmentInput,
+    AssessmentService,
     EngineRegistration,
     EngineRegistry,
     InMemoryAssessmentRepository,
@@ -225,6 +226,7 @@ def test_postgresql_repository_persists_assessment_under_rls(
 ) -> None:
     tenant_id = uuid4()
     with migrated_database.migration_engine.begin() as connection:
+        set_tenant_context(connection, tenant_id)
         connection.execute(
             text("INSERT INTO tenants (id, slug, name) VALUES (:id, :slug, :name)"),
             {"id": tenant_id, "slug": f"tenant-{tenant_id}", "name": "Tenant"},
@@ -251,6 +253,11 @@ def test_postgresql_repository_persists_assessment_under_rls(
         headers=headers,
         json=complete_assessment_payload(),
     )
+    approved = client.post(
+        f"/v1/assessments/{created.json()['assessment_id']}/approvals",
+        headers={**headers, "Idempotency-Key": "postgres-approval-key"},
+        json={"approved_at": "2026-08-25T10:00:00Z"},
+    )
     with migrated_database.app_engine.begin() as connection:
         set_tenant_context(connection, tenant_id)
         stored_outputs = connection.execute(
@@ -260,12 +267,106 @@ def test_postgresql_repository_persists_assessment_under_rls(
             ),
             {"assessment_id": created.json()["assessment_id"]},
         ).all()
+        evidence_rows = connection.execute(
+            text(
+                "SELECT source_id, raw_payload, normalized_payload, "
+                "raw_payload_hash, normalized_payload_hash, provenance "
+                "FROM evidence_records"
+            )
+        ).all()
+        decision_rows = connection.execute(
+            text(
+                "SELECT decision, reasons, decision_hash, provenance "
+                "FROM decision_records"
+            )
+        ).all()
+        audit_rows = connection.execute(
+            text(
+                "SELECT actor_id, event_type, entity_type, entity_id, payload, "
+                "integrity_hash FROM audit_events ORDER BY occurred_at, id"
+            )
+        ).all()
+        approval_count = connection.execute(
+            text("SELECT count(*) FROM human_approval_records")
+        ).scalar_one()
 
     assert created.status_code == 201
     assert duplicate.json() == created.json()
+    assert approved.status_code == 201
     assert len(stored_outputs) == 1
     assert stored_outputs[0].engine_name == "economics"
     assert stored_outputs[0].output["delivered_contribution_profit"] == "300"
+    assert len(evidence_rows) == 1
+    assert evidence_rows[0].source_id == "source-1"
+    assert evidence_rows[0].raw_payload == complete_assessment_payload()["economics"]
+    assert evidence_rows[0].normalized_payload == evidence_rows[0].raw_payload
+    assert evidence_rows[0].raw_payload_hash.startswith("sha256:")
+    assert evidence_rows[0].normalized_payload_hash.startswith("sha256:")
+    assert evidence_rows[0].provenance["source_ids"] == ["source-1"]
+    assert len(decision_rows) == 1
+    assert decision_rows[0].decision == "RESEARCH"
+    assert decision_rows[0].reasons["requested_decision"] == "RESEARCH"
+    assert decision_rows[0].reasons["recommended_decision"] == "RESEARCH"
+    assert len(decision_rows[0].reasons["gate_reasons"]) == 7
+    assert decision_rows[0].decision_hash.startswith("sha256:")
+    assert decision_rows[0].provenance["source_ids"] == ["source-1"]
+    assert approval_count == 1
+    assert {row.event_type for row in audit_rows} == {
+        "assessment.created",
+        "assessment.approved",
+    }
+    assert {row.actor_id for row in audit_rows} == {
+        "researcher-pg",
+    }
+    assert all(row.entity_id for row in audit_rows)
+    assert all(row.integrity_hash.startswith("sha256:") for row in audit_rows)
+
+
+def test_postgresql_completion_failure_rolls_back_governance_and_state(
+    migrated_database: MigratedDatabase,
+) -> None:
+    tenant_id = uuid4()
+    with migrated_database.migration_engine.begin() as connection:
+        set_tenant_context(connection, tenant_id)
+        connection.execute(
+            text("INSERT INTO tenants (id, slug, name) VALUES (:id, :slug, :name)"),
+            {"id": tenant_id, "slug": f"tenant-{tenant_id}", "name": "Tenant"},
+        )
+    repository = SqlAlchemyAssessmentRepository(migrated_database.app_engine)
+    service = AssessmentService(repository)
+
+    with pytest.raises(exc.DBAPIError):
+        service.create_assessment(
+            tenant_id=tenant_id,
+            actor_id="x" * 256,
+            idempotency_key="postgres-governance-rollback",
+            request=AssessmentInput.model_validate(complete_assessment_payload()),
+        )
+
+    with migrated_database.app_engine.begin() as connection:
+        set_tenant_context(connection, tenant_id)
+        assessment_state = connection.execute(
+            text(
+                "SELECT assessment ->> 'state' FROM assessment_records "
+                "WHERE idempotency_key = 'postgres-governance-rollback'"
+            )
+        ).scalar_one()
+        evidence_count = connection.execute(
+            text("SELECT count(*) FROM evidence_records")
+        ).scalar_one()
+        decision_count = connection.execute(
+            text("SELECT count(*) FROM decision_records")
+        ).scalar_one()
+        audit_count = connection.execute(
+            text("SELECT count(*) FROM audit_events")
+        ).scalar_one()
+        output_count = connection.execute(
+            text("SELECT count(*) FROM engine_output_records")
+        ).scalar_one()
+
+    assert assessment_state == "FAILED"
+    assert (evidence_count, decision_count, audit_count) == (0, 0, 0)
+    assert output_count == 1
 
 
 def test_postgresql_concurrent_idempotency_has_one_executor_and_no_orphans(
@@ -273,6 +374,7 @@ def test_postgresql_concurrent_idempotency_has_one_executor_and_no_orphans(
 ) -> None:
     tenant_id = uuid4()
     with migrated_database.migration_engine.begin() as connection:
+        set_tenant_context(connection, tenant_id)
         connection.execute(
             text("INSERT INTO tenants (id, slug, name) VALUES (:id, :slug, :name)"),
             {"id": tenant_id, "slug": f"tenant-{tenant_id}", "name": "Tenant"},
@@ -364,6 +466,7 @@ def test_postgresql_expired_owner_is_fenced_after_takeover(
 ) -> None:
     tenant_id = uuid4()
     with migrated_database.migration_engine.begin() as connection:
+        set_tenant_context(connection, tenant_id)
         connection.execute(
             text("INSERT INTO tenants (id, slug, name) VALUES (:id, :slug, :name)"),
             {"id": tenant_id, "slug": f"tenant-{tenant_id}", "name": "Tenant"},
@@ -390,7 +493,7 @@ def test_postgresql_expired_owner_is_fenced_after_takeover(
     winner_output = StoredEngineOutput(
         engine_name="economics",
         output={"value": "winner"},
-        output_hash="sha256:winner",
+        output_hash=service_module._json_hash({"value": "winner"}),
         provenance=provenance,
     )
     repository.save_engine_output(
@@ -417,7 +520,7 @@ def test_postgresql_expired_owner_is_fenced_after_takeover(
             StoredEngineOutput(
                 engine_name="economics",
                 output={"value": "stale"},
-                output_hash="sha256:stale",
+                output_hash=service_module._json_hash({"value": "stale"}),
                 provenance=provenance,
             ),
         )
@@ -462,6 +565,7 @@ def test_postgresql_active_heartbeat_ignores_deliberately_skewed_callers(
     monkeypatch.setattr(service_module, "datetime", ThreadSkewedDateTime)
     tenant_id = uuid4()
     with migrated_database.migration_engine.begin() as connection:
+        set_tenant_context(connection, tenant_id)
         connection.execute(
             text("INSERT INTO tenants (id, slug, name) VALUES (:id, :slug, :name)"),
             {"id": tenant_id, "slug": f"tenant-{tenant_id}", "name": "Tenant"},

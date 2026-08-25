@@ -15,7 +15,7 @@ from alembic import command
 from thinc_v5.db.migration_config import configure_alembic_url
 
 PROJECT_ROOT = Path(__file__).parents[3]
-DESTRUCTIVE_ROLE_TEST_TOKEN = "postgres16-github-actions-service-v1"
+DESTRUCTIVE_ROLE_TEST_SIGNAL = "postgres16-github-actions-service-v1"
 
 
 @dataclass(frozen=True)
@@ -119,7 +119,7 @@ def _require_ephemeral_role_test_cluster(
     required_signals = {
         "GITHUB_ACTIONS": "true",
         "CI": "true",
-        "THINC_DESTRUCTIVE_ROLE_TESTS": DESTRUCTIVE_ROLE_TEST_TOKEN,
+        "THINC_DESTRUCTIVE_ROLE_TESTS": DESTRUCTIVE_ROLE_TEST_SIGNAL,
         "THINC_TEST_DATABASE_DISPOSABLE": "1",
     }
     if any(environ.get(key) != value for key, value in required_signals.items()):

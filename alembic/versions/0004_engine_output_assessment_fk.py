@@ -29,12 +29,6 @@ def upgrade() -> None:
             nullable=True,
         ),
     )
-    op.execute(
-        "UPDATE assessment_records "
-        "SET lease_expires_at = clock_timestamp() + INTERVAL '5 minutes', "
-        "assessment = assessment - 'lease_expires_at' "
-        "WHERE assessment ->> 'state' = 'PENDING'"
-    )
     op.create_table(
         "engine_output_quarantine",
         sa.Column(
@@ -61,8 +55,16 @@ def upgrade() -> None:
     op.execute(
         "REVOKE ALL PRIVILEGES ON engine_output_quarantine FROM PUBLIC, thinc_app"
     )
+    op.execute("LOCK TABLE assessment_records IN ACCESS EXCLUSIVE MODE")
     op.execute("LOCK TABLE engine_output_records IN ACCESS EXCLUSIVE MODE")
+    op.execute("ALTER TABLE assessment_records NO FORCE ROW LEVEL SECURITY")
     op.execute("ALTER TABLE engine_output_records NO FORCE ROW LEVEL SECURITY")
+    op.execute(
+        "UPDATE assessment_records "
+        "SET lease_expires_at = clock_timestamp() + INTERVAL '5 minutes', "
+        "assessment = assessment - 'lease_expires_at' "
+        "WHERE assessment ->> 'state' = 'PENDING'"
+    )
     op.execute(
         "INSERT INTO engine_output_quarantine "
         "(source_output_id, tenant_id, assessment_id, engine_name, output, "
@@ -87,6 +89,7 @@ def upgrade() -> None:
         "AND assessment_record.domain_assessment_id = output_record.assessment_id"
         ")"
     )
+    op.execute("ALTER TABLE assessment_records FORCE ROW LEVEL SECURITY")
     op.execute("ALTER TABLE engine_output_records FORCE ROW LEVEL SECURITY")
     op.create_foreign_key(
         "fk_engine_output_records_assessment_tenant",
@@ -104,9 +107,10 @@ def downgrade() -> None:
         "engine_output_records",
         type_="foreignkey",
     )
+    op.execute("LOCK TABLE assessment_records IN ACCESS EXCLUSIVE MODE")
     op.execute("LOCK TABLE engine_output_records IN ACCESS EXCLUSIVE MODE")
     op.execute("LOCK TABLE engine_output_quarantine IN ACCESS EXCLUSIVE MODE")
-    op.execute("LOCK TABLE assessment_records IN ACCESS EXCLUSIVE MODE")
+    op.execute("ALTER TABLE assessment_records NO FORCE ROW LEVEL SECURITY")
     op.execute("ALTER TABLE engine_output_records NO FORCE ROW LEVEL SECURITY")
     op.execute(
         "DO $$ BEGIN "
@@ -149,8 +153,6 @@ def downgrade() -> None:
         "RAISE EXCEPTION 'unresolved engine output quarantine'; "
         "END IF; END $$"
     )
-    op.execute("ALTER TABLE engine_output_records FORCE ROW LEVEL SECURITY")
-    op.drop_table("engine_output_quarantine")
     op.execute(
         "UPDATE assessment_records "
         "SET assessment = jsonb_set("
@@ -158,4 +160,7 @@ def downgrade() -> None:
         ") WHERE assessment ->> 'state' = 'PENDING' "
         "AND lease_expires_at IS NOT NULL"
     )
+    op.execute("ALTER TABLE assessment_records FORCE ROW LEVEL SECURITY")
+    op.execute("ALTER TABLE engine_output_records FORCE ROW LEVEL SECURITY")
+    op.drop_table("engine_output_quarantine")
     op.drop_column("assessment_records", "lease_expires_at")

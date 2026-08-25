@@ -8,6 +8,7 @@ from uuid import UUID
 import pytest
 from pydantic import BaseModel
 
+import thinc_v5.decision.service as service_module
 from thinc_v5.decision.service import (
     AssessmentInput,
     AssessmentNotFound,
@@ -136,8 +137,14 @@ class MismatchedStoredApprovalRepository(InMemoryAssessmentRepository):
         tenant_id: UUID,
         idempotency_key: str,
         stored: StoredApproval,
+        audit_event: service_module.StoredAuditEvent,
     ) -> StoredApproval:
-        saved = super().save_approval(tenant_id, idempotency_key, stored)
+        saved = super().save_approval(
+            tenant_id,
+            idempotency_key,
+            stored,
+            audit_event,
+        )
         return StoredApproval(
             request_hash="sha256:different",
             approval=saved.approval,
@@ -341,13 +348,13 @@ def test_inmemory_repository_blocks_conflicting_engine_output_hash() -> None:
     original = StoredEngineOutput(
         engine_name="economics",
         output={"value": "first"},
-        output_hash="sha256:first",
+        output_hash=service_module._json_hash({"value": "first"}),
         provenance={"source_ids": ["source-1"]},
     )
     conflict = StoredEngineOutput(
         engine_name="economics",
         output={"value": "second"},
-        output_hash="sha256:second",
+        output_hash=service_module._json_hash({"value": "second"}),
         provenance={"source_ids": ["source-1"]},
     )
 
@@ -368,17 +375,19 @@ def test_inmemory_repository_blocks_conflicting_engine_output_hash() -> None:
 
 def test_memory_repository_save_approval_requires_existing_assessment() -> None:
     repository = InMemoryAssessmentRepository()
+    stored = StoredApproval(
+        request_hash="sha256:approval",
+        approval=HumanApproval(
+            approver_id="researcher-1",
+            approved_at=datetime(2026, 8, 25, 14, 0, tzinfo=UTC),
+            assessment_id="missing-assessment",
+        ),
+    )
 
     with pytest.raises(AssessmentNotFound):
         repository.save_approval(
             UUID("11111111-1111-4111-8111-111111111111"),
             "missing-approval",
-            StoredApproval(
-                request_hash="sha256:approval",
-                approval=HumanApproval(
-                    approver_id="researcher-1",
-                    approved_at=datetime(2026, 8, 25, 14, 0, tzinfo=UTC),
-                    assessment_id="missing-assessment",
-                ),
-            ),
+            stored,
+            service_module._approval_audit_event(stored),
         )

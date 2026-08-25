@@ -9,7 +9,7 @@ from alembic.config import Config
 from sqlalchemy import Engine, exc, inspect, text
 
 from alembic import command
-from thinc_v5.db.models import BUSINESS_TABLE_NAMES
+from thinc_v5.db.models import BUSINESS_TABLE_NAMES, RLS_TABLE_NAMES
 from thinc_v5.db.session import set_tenant_context
 
 from .conftest import PROJECT_ROOT, MigratedDatabase, alembic_config, safe_downgrade
@@ -28,6 +28,14 @@ def test_offline_migration_enables_and_forces_rls_for_every_business_table() -> 
         assert f"ALTER TABLE {table_name} ENABLE ROW LEVEL SECURITY" in sql
         assert f"ALTER TABLE {table_name} FORCE ROW LEVEL SECURITY" in sql
         assert f"CREATE POLICY tenant_isolation ON {table_name}" in sql
+    assert set(RLS_TABLE_NAMES) == {*BUSINESS_TABLE_NAMES, "tenants"}
+    assert "ALTER TABLE tenants ENABLE ROW LEVEL SECURITY" in sql
+    assert "ALTER TABLE tenants FORCE ROW LEVEL SECURITY" in sql
+    assert "CREATE POLICY tenant_self_access ON tenants FOR SELECT" in sql
+    assert "TO thinc_app" in sql
+    assert "CREATE POLICY tenant_owner_management ON tenants" in sql
+    assert "TO CURRENT_USER USING (true) WITH CHECK (true)" in sql
+    assert "USING (id = current_setting('app.tenant_id', true)::uuid)" in sql
     assert "current_setting('app.tenant_id', true)::uuid" in sql
     assert "domain_assessment_id VARCHAR(255) NOT NULL" in sql
     assert "uq_assessment_records_tenant_id_id" in sql
@@ -58,6 +66,30 @@ def test_offline_migration_quarantines_orphan_engine_outputs_before_fk() -> None
     assert "NOT EXISTS" in sql[quarantine_at:fk_at]
     assert "orphaned before tenant-aware assessment foreign key" in sql
     assert "quarantined_at" in sql
+    assessment_lock_at = sql.index(
+        "LOCK TABLE assessment_records IN ACCESS EXCLUSIVE MODE"
+    )
+    output_lock_at = sql.index(
+        "LOCK TABLE engine_output_records IN ACCESS EXCLUSIVE MODE"
+    )
+    assessment_unforce_at = sql.index(
+        "ALTER TABLE assessment_records NO FORCE ROW LEVEL SECURITY"
+    )
+    output_unforce_at = sql.index(
+        "ALTER TABLE engine_output_records NO FORCE ROW LEVEL SECURITY"
+    )
+    assessment_reforce_at = sql.index(
+        "ALTER TABLE assessment_records FORCE ROW LEVEL SECURITY",
+        assessment_unforce_at,
+    )
+    output_reforce_at = sql.index(
+        "ALTER TABLE engine_output_records FORCE ROW LEVEL SECURITY",
+        output_unforce_at,
+    )
+    assert assessment_lock_at < assessment_unforce_at < quarantine_at
+    assert output_lock_at < output_unforce_at < quarantine_at
+    assert quarantine_at < assessment_reforce_at
+    assert delete_at < output_reforce_at
 
 
 def test_offline_downgrade_fails_closed_before_dropping_quarantine() -> None:
@@ -80,46 +112,91 @@ def test_offline_downgrade_fails_closed_before_dropping_quarantine() -> None:
     assert "ON CONFLICT DO NOTHING" not in sql
     assert conflict_guard_at < restore_at < unresolved_guard_at < drop_at
     assert "IS NOT DISTINCT FROM" in sql[restore_at:unresolved_guard_at]
+    assessment_unforce_at = sql.index(
+        "ALTER TABLE assessment_records NO FORCE ROW LEVEL SECURITY"
+    )
+    assessment_reforce_at = sql.index(
+        "ALTER TABLE assessment_records FORCE ROW LEVEL SECURITY",
+        assessment_unforce_at,
+    )
+    output_unforce_at = sql.index(
+        "ALTER TABLE engine_output_records NO FORCE ROW LEVEL SECURITY"
+    )
+    output_reforce_at = sql.index(
+        "ALTER TABLE engine_output_records FORCE ROW LEVEL SECURITY",
+        output_unforce_at,
+    )
+    assert assessment_unforce_at < restore_at < assessment_reforce_at
+    assert output_unforce_at < restore_at < output_reforce_at
 
 
-def test_upgrade_from_0003_quarantines_existing_orphan_engine_output(
+def test_upgrade_and_downgrade_preserve_valid_output_and_quarantine_only_orphan(
     database_url: str,
     migrated_database: MigratedDatabase,
 ) -> None:
     config = alembic_config(database_url)
     command.downgrade(config, "0003_engine_output_records")
     tenant_id = uuid.uuid4()
-    output_id = uuid.uuid4()
+    assessment_record_id = uuid.uuid4()
+    valid_output_id = uuid.uuid4()
+    orphan_output_id = uuid.uuid4()
     with migrated_database.migration_engine.begin() as connection:
+        set_tenant_context(connection, tenant_id)
         connection.execute(
             text("INSERT INTO tenants (id, slug, name) VALUES (:id, :slug, :name)"),
             {"id": tenant_id, "slug": f"tenant-{tenant_id}", "name": "Tenant"},
         )
-        set_tenant_context(connection, tenant_id)
+        connection.execute(
+            text(
+                "INSERT INTO assessment_records "
+                "(id, tenant_id, domain_assessment_id, assessment, "
+                "assessment_hash, provenance) VALUES "
+                "(:id, :tenant_id, 'valid-assessment', "
+                "CAST(:assessment AS jsonb), 'sha256:pending', "
+                "CAST(:provenance AS jsonb))"
+            ),
+            {
+                "id": assessment_record_id,
+                "tenant_id": tenant_id,
+                "assessment": (
+                    '{"state": "PENDING", "request_hash": "sha256:pending", '
+                    '"lease_expires_at": "2026-08-25T10:00:00+00:00"}'
+                ),
+                "provenance": '{"source_ids": ["legacy-source"]}',
+            },
+        )
         connection.execute(
             text(
                 "INSERT INTO engine_output_records "
                 "(id, tenant_id, assessment_id, engine_name, output, "
                 "output_hash, provenance) VALUES "
-                "(:id, :tenant_id, 'missing-assessment', 'economics', "
-                "CAST(:output AS jsonb), 'sha256:orphan', "
+                "(:valid_id, :tenant_id, 'valid-assessment', 'economics', "
+                "CAST(:valid_output AS jsonb), 'sha256:valid', "
+                "CAST(:provenance AS jsonb)), "
+                "(:orphan_id, :tenant_id, 'missing-assessment', 'economics', "
+                "CAST(:orphan_output AS jsonb), 'sha256:orphan', "
                 "CAST(:provenance AS jsonb))"
             ),
             {
-                "id": output_id,
+                "valid_id": valid_output_id,
+                "orphan_id": orphan_output_id,
                 "tenant_id": tenant_id,
-                "output": '{"value": "preserve-me"}',
+                "valid_output": '{"value": "valid"}',
+                "orphan_output": '{"value": "preserve-me"}',
                 "provenance": '{"source_ids": ["legacy-source"]}',
             },
         )
 
     command.upgrade(config, "head")
 
-    with migrated_database.migration_engine.connect() as connection:
-        orphan = connection.execute(
-            text("SELECT id FROM engine_output_records WHERE id = :id"),
-            {"id": output_id},
-        ).one_or_none()
+    with migrated_database.migration_engine.begin() as connection:
+        set_tenant_context(connection, tenant_id)
+        outputs = connection.execute(
+            text(
+                "SELECT id, assessment_id FROM engine_output_records "
+                "ORDER BY assessment_id"
+            )
+        ).all()
         quarantined = connection.execute(
             text(
                 "SELECT tenant_id, source_output_id, assessment_id, engine_name, "
@@ -127,10 +204,19 @@ def test_upgrade_from_0003_quarantines_existing_orphan_engine_output(
                 "quarantined_at FROM engine_output_quarantine "
                 "WHERE source_output_id = :id"
             ),
-            {"id": output_id},
+            {"id": orphan_output_id},
+        ).one()
+        pending = connection.execute(
+            text(
+                "SELECT assessment, lease_expires_at FROM assessment_records "
+                "WHERE id = :id"
+            ),
+            {"id": assessment_record_id},
         ).one()
 
-    assert orphan is None
+    assert [(row.id, row.assessment_id) for row in outputs] == [
+        (valid_output_id, "valid-assessment")
+    ]
     assert quarantined.tenant_id == tenant_id
     assert quarantined.assessment_id == "missing-assessment"
     assert quarantined.engine_name == "economics"
@@ -141,6 +227,29 @@ def test_upgrade_from_0003_quarantines_existing_orphan_engine_output(
         "orphaned before tenant-aware assessment foreign key"
     )
     assert quarantined.quarantined_at is not None
+    assert pending.lease_expires_at is not None
+    assert "lease_expires_at" not in pending.assessment
+
+    command.downgrade(config, "0003_engine_output_records")
+
+    with migrated_database.migration_engine.begin() as connection:
+        set_tenant_context(connection, tenant_id)
+        restored_outputs = connection.execute(
+            text(
+                "SELECT id, assessment_id FROM engine_output_records "
+                "ORDER BY assessment_id"
+            )
+        ).all()
+        restored_assessment = connection.execute(
+            text("SELECT assessment FROM assessment_records WHERE id = :id"),
+            {"id": assessment_record_id},
+        ).scalar_one()
+
+    assert {(row.id, row.assessment_id) for row in restored_outputs} == {
+        (valid_output_id, "valid-assessment"),
+        (orphan_output_id, "missing-assessment"),
+    }
+    assert restored_assessment["lease_expires_at"]
 
 
 def test_downgrade_conflict_aborts_and_preserves_quarantine(
@@ -154,6 +263,7 @@ def test_downgrade_conflict_aborts_and_preserves_quarantine(
     conflicting_id = uuid.uuid4()
     assessment_record_id = uuid.uuid4()
     with migrated_database.migration_engine.begin() as connection:
+        set_tenant_context(connection, tenant_id)
         connection.execute(
             text("INSERT INTO tenants (id, slug, name) VALUES (:id, :slug, :name)"),
             {"id": tenant_id, "slug": f"tenant-{tenant_id}", "name": "Tenant"},
@@ -178,6 +288,7 @@ def test_downgrade_conflict_aborts_and_preserves_quarantine(
 
     command.upgrade(config, "head")
     with migrated_database.migration_engine.begin() as connection:
+        set_tenant_context(connection, tenant_id)
         _insert_assessment(
             connection,
             tenant_id,
@@ -201,11 +312,13 @@ def test_downgrade_conflict_aborts_and_preserves_quarantine(
             },
         )
 
+    command.downgrade(config, "0004_engine_output_assessment_fk")
     try:
         with pytest.raises(exc.DBAPIError, match="quarantine restore conflict"):
             command.downgrade(config, "0003_engine_output_records")
 
-        with migrated_database.migration_engine.connect() as connection:
+        with migrated_database.migration_engine.begin() as connection:
+            set_tenant_context(connection, tenant_id)
             revision = connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
@@ -222,6 +335,15 @@ def test_downgrade_conflict_aborts_and_preserves_quarantine(
                 ),
                 {"id": conflicting_id},
             ).one()
+            forced_rls = connection.execute(
+                text(
+                    "SELECT relname, relforcerowsecurity FROM pg_class "
+                    "JOIN pg_namespace ON pg_namespace.oid = relnamespace "
+                    "WHERE nspname = current_schema() "
+                    "AND relname = ANY(:tables) ORDER BY relname"
+                ),
+                {"tables": ["assessment_records", "engine_output_records"]},
+            ).all()
 
         assert revision == "0004_engine_output_assessment_fk"
         assert quarantined.source_output_id == quarantined_id
@@ -229,12 +351,17 @@ def test_downgrade_conflict_aborts_and_preserves_quarantine(
         assert quarantined.output_hash == "sha256:quarantined"
         assert conflict.id == conflicting_id
         assert conflict.output_hash == "sha256:conflict"
+        assert [(row.relname, row.relforcerowsecurity) for row in forced_rls] == [
+            ("assessment_records", True),
+            ("engine_output_records", True),
+        ]
     finally:
         if (
             "engine_output_quarantine"
             in inspect(migrated_database.migration_engine).get_table_names()
         ):
             with migrated_database.migration_engine.begin() as connection:
+                set_tenant_context(connection, tenant_id)
                 connection.execute(
                     text("DELETE FROM engine_output_records WHERE id = :id"),
                     {"id": conflicting_id},
@@ -281,6 +408,36 @@ def test_assessments_cannot_be_read_across_tenants(
     assert direct_row is None
 
 
+def test_app_role_can_select_only_the_current_tenant_metadata(
+    migrated_database: MigratedDatabase,
+) -> None:
+    tenant_a, tenant_b = _create_tenants(migrated_database.migration_engine)
+
+    with migrated_database.app_engine.begin() as connection:
+        set_tenant_context(connection, tenant_a)
+        visible = connection.execute(text("SELECT id, slug FROM tenants")).all()
+        hidden = connection.execute(
+            text("SELECT id FROM tenants WHERE id = :id"),
+            {"id": tenant_b},
+        ).one_or_none()
+
+    assert [(row.id, row.slug) for row in visible] == [(tenant_a, f"tenant-{tenant_a}")]
+    assert hidden is None
+
+    with pytest.raises(exc.DBAPIError) as error:
+        with migrated_database.app_engine.begin() as connection:
+            set_tenant_context(connection, tenant_a)
+            connection.execute(
+                text(
+                    "INSERT INTO tenants (id, slug, name) "
+                    "VALUES (:id, :slug, 'Forbidden')"
+                ),
+                {"id": uuid.uuid4(), "slug": f"forbidden-{uuid.uuid4()}"},
+            )
+
+    assert getattr(error.value.orig, "sqlstate", None) == "42501"
+
+
 def test_cross_tenant_assessment_reference_is_rejected(
     migrated_database: MigratedDatabase,
 ) -> None:
@@ -318,20 +475,17 @@ def test_cross_tenant_assessment_reference_is_rejected(
 def _create_tenants(engine: Engine) -> tuple[uuid.UUID, uuid.UUID]:
     tenant_a = uuid.uuid4()
     tenant_b = uuid.uuid4()
-    with engine.begin() as connection:
-        connection.execute(
-            text(
-                "INSERT INTO tenants (id, slug, name) VALUES "
-                "(:tenant_a, :slug_a, 'Tenant A'), "
-                "(:tenant_b, :slug_b, 'Tenant B')"
-            ),
-            {
-                "tenant_a": tenant_a,
-                "slug_a": f"tenant-{tenant_a}",
-                "tenant_b": tenant_b,
-                "slug_b": f"tenant-{tenant_b}",
-            },
-        )
+    for tenant_id, name in ((tenant_a, "Tenant A"), (tenant_b, "Tenant B")):
+        with engine.begin() as connection:
+            set_tenant_context(connection, tenant_id)
+            connection.execute(
+                text("INSERT INTO tenants (id, slug, name) VALUES (:id, :slug, :name)"),
+                {
+                    "id": tenant_id,
+                    "slug": f"tenant-{tenant_id}",
+                    "name": name,
+                },
+            )
     return tenant_a, tenant_b
 
 

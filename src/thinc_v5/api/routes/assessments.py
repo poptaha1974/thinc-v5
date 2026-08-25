@@ -1,10 +1,16 @@
 from collections.abc import Callable
-from datetime import datetime
 from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, status
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+)
 
 from thinc_v5.decision.service import (
     AssessmentInput,
@@ -37,7 +43,9 @@ class TestIdentity(BaseModel):
 
 
 class ApprovalInput(BaseModel):
-    approved_at: datetime | None = None
+    model_config = ConfigDict(extra="forbid")
+
+    approved_at: AwareDatetime | None = None
 
 
 class ProblemDetails(BaseModel):

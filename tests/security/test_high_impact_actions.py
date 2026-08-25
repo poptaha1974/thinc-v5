@@ -139,6 +139,25 @@ def test_approval_post_requires_idempotency_key() -> None:
     assert response.headers["content-type"].startswith("application/problem+json")
 
 
+def test_approval_rejects_naive_rfc3339_datetime_with_problem_details() -> None:
+    client = build_client()
+    created = client.post(
+        "/v1/assessments",
+        headers={**TENANT_A_HEADERS, "Idempotency-Key": "naive-approval-create"},
+        json=complete_assessment_payload(),
+    ).json()
+
+    response = client.post(
+        f"/v1/assessments/{created['assessment_id']}/approvals",
+        headers={**TENANT_A_HEADERS, "Idempotency-Key": "naive-approval"},
+        json={"approved_at": "2026-08-25T10:00:00"},
+    )
+
+    assert response.status_code == 422
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert response.json()["status"] == 422
+
+
 def test_posts_reject_blank_idempotency_keys() -> None:
     response = build_client().post(
         "/v1/assessments",

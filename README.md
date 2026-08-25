@@ -73,11 +73,12 @@ The research-preview docs test is:
 .\.venv\Scripts\python.exe -m pytest tests/docs/test_required_disclosures.py -v
 ```
 
-The PowerShell-safe literal-secret scan is:
+The cross-platform credential scan checks tracked and untracked source files
+for literal `PASSWORD`, `SECRET`, `TOKEN`, and `API_KEY` assignments as well as
+credentials embedded in database and other URIs:
 
 ```powershell
-$pattern = '(?i)\b(?:api[_-]?key|client[_-]?secret|secret(?:[_-]?key)?|access[_-]?token|refresh[_-]?token|password)\b\s*[:=]\s*(?:"[^"]+"|''[^'']+''|[^\s$<][^\r\n#;]*)'
-git grep -nP -- "$pattern" -- . ':(exclude).env.example'
+.\.venv\Scripts\python.exe scripts\secret_scan.py
 ```
 
 ### 6. Start the API
@@ -86,7 +87,10 @@ This startup path is fail-closed. It starts only when
 `THINC_ENABLE_INSECURE_TEST_IDENTITY=true` is set explicitly. It uses
 `HeaderTestIdentityProvider`, an insecure header-based test identity dependency
 for local synthetic development only. Production deployment wiring is
-intentionally absent.
+intentionally absent. It also constructs `InMemoryAssessmentRepository`: the
+devserver is nonpersistent and does not connect to PostgreSQL, even when a SQL
+URL is present in the environment. All assessments and audit records disappear
+when the process exits; this command is not a database integration test.
 
 ```powershell
 $env:THINC_ENABLE_INSECURE_TEST_IDENTITY = "true"
