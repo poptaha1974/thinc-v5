@@ -13,15 +13,20 @@ from tests.integration.api.test_assessments import (
     complete_assessment_payload,
 )
 from thinc_v5.api.app import create_app
-from thinc_v5.api.routes.assessments import TestIdentity
-from thinc_v5.decision.service import InMemoryAssessmentRepository
+from thinc_v5.decision.service import (
+    AssessmentInput,
+    EngineRegistration,
+    EngineRegistry,
+    InMemoryAssessmentRepository,
+)
+from thinc_v5.domain.economics import EconomicsAssessment
 
 
 def injected_test_identity(
     x_tenant_id: Annotated[UUID, Header(alias="X-Tenant-ID")],
     x_test_identity: Annotated[str, Header(alias="X-Test-Identity")],
-) -> TestIdentity:
-    return TestIdentity(tenant_id=x_tenant_id, actor_id=x_test_identity)
+) -> dict[str, object]:
+    return {"tenant_id": x_tenant_id, "actor_id": x_test_identity}
 
 
 def build_client() -> TestClient:
@@ -189,3 +194,37 @@ def test_create_rejects_blank_tenant_header_with_problem_details() -> None:
 
     assert response.status_code == 422
     assert response.headers["content-type"].startswith("application/problem+json")
+
+
+def test_internal_engine_validation_error_is_safe_500_problem() -> None:
+    def corrupt_engine_result(request: AssessmentInput) -> EconomicsAssessment:
+        del request
+        return EconomicsAssessment.model_validate({"corrupt": True})
+
+    client = TestClient(
+        create_app(
+            repository=InMemoryAssessmentRepository(),
+            identity_provider=injected_test_identity,
+            engine_registry=EngineRegistry(
+                (
+                    EngineRegistration(
+                        name="economics",
+                        run=corrupt_engine_result,
+                        output_model=EconomicsAssessment,
+                    ),
+                )
+            ),
+        ),
+        raise_server_exceptions=False,
+    )
+
+    response = client.post(
+        "/v1/assessments",
+        headers={**TENANT_A_HEADERS, "Idempotency-Key": "corrupt-engine"},
+        json=complete_assessment_payload(),
+    )
+
+    assert response.status_code == 500
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert response.json()["detail"] == "An internal error occurred."
+    assert "corrupt" not in response.text

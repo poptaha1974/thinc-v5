@@ -4,7 +4,7 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, status
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from thinc_v5.decision.service import (
     AssessmentInput,
@@ -49,7 +49,7 @@ class ProblemDetails(BaseModel):
     errors: list[dict[str, Any]] | None = None
 
 
-IdentityProvider = Callable[..., TestIdentity]
+IdentityProvider = Callable[..., object]
 IdempotencyKey = Annotated[
     str,
     Header(
@@ -76,22 +76,36 @@ def problem_responses(*status_codes: int) -> dict[int | str, dict[str, Any]]:
     }
 
 
+class IdentityValidationError(Exception):
+    def __init__(self, errors: list[Any]) -> None:
+        super().__init__("test identity validation failed")
+        self.errors = [dict(error) for error in errors]
+
+
 def create_assessment_router(
     service: AssessmentService,
     identity_provider: IdentityProvider,
 ) -> APIRouter:
     router = APIRouter(prefix="/v1/assessments", tags=["assessments"])
 
+    def identity_boundary(
+        raw_identity: Annotated[object, Depends(identity_provider)],
+    ) -> TestIdentity:
+        try:
+            return TestIdentity.model_validate(raw_identity)
+        except ValidationError as error:
+            raise IdentityValidationError(error.errors()) from error
+
     @router.post(
         "",
         response_model=AssessmentResponse,
         status_code=status.HTTP_201_CREATED,
-        responses=problem_responses(400, 409, 422),
+        responses=problem_responses(400, 409, 422, 500),
     )
     def create_assessment(
         request: AssessmentInput,
         idempotency_key: IdempotencyKey,
-        identity: Annotated[TestIdentity, Depends(identity_provider)],
+        identity: Annotated[TestIdentity, Depends(identity_boundary)],
     ) -> AssessmentResponse:
         return service.create_assessment(
             tenant_id=identity.tenant_id,
@@ -103,11 +117,11 @@ def create_assessment_router(
     @router.get(
         "/{assessment_id}",
         response_model=AssessmentResponse,
-        responses=problem_responses(404, 422),
+        responses=problem_responses(404, 422, 500),
     )
     def get_assessment(
         assessment_id: str,
-        identity: Annotated[TestIdentity, Depends(identity_provider)],
+        identity: Annotated[TestIdentity, Depends(identity_boundary)],
     ) -> AssessmentResponse:
         return service.get_assessment(identity.tenant_id, assessment_id)
 
@@ -115,13 +129,13 @@ def create_assessment_router(
         "/{assessment_id}/approvals",
         response_model=HumanApproval,
         status_code=status.HTTP_201_CREATED,
-        responses=problem_responses(400, 404, 409, 422),
+        responses=problem_responses(400, 404, 409, 422, 500),
     )
     def approve_assessment(
         assessment_id: str,
         request: ApprovalInput,
         idempotency_key: IdempotencyKey,
-        identity: Annotated[TestIdentity, Depends(identity_provider)],
+        identity: Annotated[TestIdentity, Depends(identity_boundary)],
     ) -> HumanApproval:
         return service.approve_assessment(
             tenant_id=identity.tenant_id,

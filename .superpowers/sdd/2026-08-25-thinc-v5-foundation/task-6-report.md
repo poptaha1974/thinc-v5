@@ -64,3 +64,28 @@ FastAPI emitted an upstream `asyncio.iscoroutinefunction` deprecation warning on
 - Ruff: clean. Mypy: clean across 20 source files.
 - The skipped live PostgreSQL tests remain unverified and are not counted as
   successful database runs.
+
+## Review round 2/5
+
+- Assessment POST idempotency now reserves a stable assessment ID before any
+  engine runs. In-memory callers coordinate through a condition; PostgreSQL
+  callers coordinate through the tenant-scoped unique key plus advisory locks.
+- Reservations use `PENDING`, `COMPLETED`, and `FAILED` states with an owner
+  token. Followers wait for the completed response. Ordinary executor failures
+  mark the reservation retryable, and a five-minute PostgreSQL lease provides
+  explicit crash-recovery semantics without changing the assessment ID.
+- Successful engine outputs are reused by their declared `output_model` on a
+  retry, so completed engines are not executed twice and non-deterministic
+  hashes cannot poison retry. Engine outputs now have a tenant-aware foreign
+  key to the reserved assessment, preventing orphan rows.
+- Added a deterministic two-thread in-memory concurrency test that proves one
+  assessment ID, one engine execution, and one output. Added an equivalent live
+  PostgreSQL test; it skipped locally and is not counted as a successful live
+  database run.
+- Removed the global Pydantic `ValidationError` mapping. Raw injected test
+  identity is validated inside its dependency boundary and only that custom
+  boundary error maps to 422. Internal engine/persistence exceptions map to a
+  safe RFC 9457 500 response without exposing exception details.
+- Focused suite: `30 passed, 2 skipped`.
+- Full regression: `94 passed, 19 skipped`.
+- Ruff and mypy: clean.

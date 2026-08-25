@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from collections.abc import Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from threading import RLock
-from typing import Any, Literal, Protocol
+from datetime import UTC, datetime, timedelta
+from threading import Condition, RLock
+from typing import Any, Literal, Protocol, cast
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel
-from sqlalchemy import insert, select, text
+from sqlalchemy import insert, select, text, update
 from sqlalchemy.engine import Connection, Engine, Row
 from sqlalchemy.sql import Select
 
@@ -67,6 +68,7 @@ EngineRunner = Callable[[AssessmentInput], BaseModel]
 class EngineRegistration:
     name: str
     run: EngineRunner
+    output_model: type[BaseModel]
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -96,9 +98,20 @@ class StoredEngineOutput:
 
 
 @dataclass(frozen=True)
-class StoredAssessment:
+class AssessmentReservation:
+    assessment_id: str
+    owner_token: str
+    execute: bool
+    response: AssessmentResponse | None = None
+
+
+@dataclass
+class _MemoryReservation:
+    assessment_id: str
+    owner_token: str
     request_hash: str
-    response: AssessmentResponse
+    state: Literal["PENDING", "FAILED", "COMPLETED"]
+    response: AssessmentResponse | None = None
 
 
 @dataclass(frozen=True)
@@ -108,6 +121,31 @@ class StoredApproval:
 
 
 class AssessmentRepository(Protocol):
+    def reserve_assessment(
+        self,
+        tenant_id: UUID,
+        idempotency_key: str,
+        request_hash: str,
+        provenance: dict[str, object],
+    ) -> AssessmentReservation: ...
+
+    def complete_assessment(
+        self,
+        tenant_id: UUID,
+        idempotency_key: str,
+        request_hash: str,
+        reservation: AssessmentReservation,
+        response: AssessmentResponse,
+    ) -> None: ...
+
+    def fail_assessment(
+        self,
+        tenant_id: UUID,
+        idempotency_key: str,
+        request_hash: str,
+        reservation: AssessmentReservation,
+    ) -> None: ...
+
     def save_engine_output(
         self,
         tenant_id: UUID,
@@ -115,18 +153,12 @@ class AssessmentRepository(Protocol):
         stored: StoredEngineOutput,
     ) -> None: ...
 
-    def get_by_idempotency_key(
+    def get_engine_output(
         self,
         tenant_id: UUID,
-        idempotency_key: str,
-    ) -> StoredAssessment | None: ...
-
-    def save_assessment(
-        self,
-        tenant_id: UUID,
-        idempotency_key: str,
-        stored: StoredAssessment,
-    ) -> StoredAssessment: ...
+        assessment_id: str,
+        engine_name: str,
+    ) -> StoredEngineOutput | None: ...
 
     def get_assessment(
         self,
@@ -153,13 +185,76 @@ class InMemoryAssessmentRepository:
 
     def __init__(self) -> None:
         self._lock = RLock()
-        self._by_idempotency: dict[tuple[UUID, str], StoredAssessment] = {}
+        self._condition = Condition(self._lock)
+        self._reservations: dict[tuple[UUID, str], _MemoryReservation] = {}
         self._by_id: dict[tuple[UUID, str], AssessmentResponse] = {}
         self._approvals: dict[tuple[UUID, str], StoredApproval] = {}
         self._approval_idempotency: dict[tuple[UUID, str], StoredApproval] = {}
         self._engine_outputs: dict[
             tuple[UUID, str, str], StoredEngineOutput
         ] = {}
+
+    def reserve_assessment(
+        self,
+        tenant_id: UUID,
+        idempotency_key: str,
+        request_hash: str,
+        provenance: dict[str, object],
+    ) -> AssessmentReservation:
+        del provenance
+        key = (tenant_id, idempotency_key)
+        with self._condition:
+            while True:
+                stored = self._reservations.get(key)
+                if stored is None:
+                    stored = _MemoryReservation(
+                        assessment_id=str(uuid4()),
+                        owner_token=str(uuid4()),
+                        request_hash=request_hash,
+                        state="PENDING",
+                    )
+                    self._reservations[key] = stored
+                    return _memory_reservation(stored, execute=True)
+                if stored.request_hash != request_hash:
+                    raise IdempotencyConflict
+                if stored.state == "COMPLETED":
+                    return _memory_reservation(stored, execute=False)
+                if stored.state == "FAILED":
+                    stored.state = "PENDING"
+                    stored.owner_token = str(uuid4())
+                    return _memory_reservation(stored, execute=True)
+                self._condition.wait()
+
+    def complete_assessment(
+        self,
+        tenant_id: UUID,
+        idempotency_key: str,
+        request_hash: str,
+        reservation: AssessmentReservation,
+        response: AssessmentResponse,
+    ) -> None:
+        key = (tenant_id, idempotency_key)
+        with self._condition:
+            stored = self._reservations[key]
+            _require_reservation_owner(stored, request_hash, reservation)
+            stored.state = "COMPLETED"
+            stored.response = deepcopy(response)
+            self._by_id[(tenant_id, response.assessment_id)] = deepcopy(response)
+            self._condition.notify_all()
+
+    def fail_assessment(
+        self,
+        tenant_id: UUID,
+        idempotency_key: str,
+        request_hash: str,
+        reservation: AssessmentReservation,
+    ) -> None:
+        key = (tenant_id, idempotency_key)
+        with self._condition:
+            stored = self._reservations[key]
+            _require_reservation_owner(stored, request_hash, reservation)
+            stored.state = "FAILED"
+            self._condition.notify_all()
 
     def save_engine_output(
         self,
@@ -174,32 +269,16 @@ class InMemoryAssessmentRepository:
                 raise IdempotencyConflict
             self._engine_outputs[key] = deepcopy(stored)
 
-    def get_by_idempotency_key(
+    def get_engine_output(
         self,
         tenant_id: UUID,
-        idempotency_key: str,
-    ) -> StoredAssessment | None:
+        assessment_id: str,
+        engine_name: str,
+    ) -> StoredEngineOutput | None:
         with self._lock:
-            stored = self._by_idempotency.get((tenant_id, idempotency_key))
-            return deepcopy(stored)
-
-    def save_assessment(
-        self,
-        tenant_id: UUID,
-        idempotency_key: str,
-        stored: StoredAssessment,
-    ) -> StoredAssessment:
-        with self._lock:
-            key = (tenant_id, idempotency_key)
-            prior = self._by_idempotency.get(key)
-            if prior is not None:
-                return deepcopy(prior)
-            copied = deepcopy(stored)
-            self._by_idempotency[key] = copied
-            self._by_id[(tenant_id, stored.response.assessment_id)] = deepcopy(
-                stored.response
+            return deepcopy(
+                self._engine_outputs.get((tenant_id, assessment_id, engine_name))
             )
-            return deepcopy(copied)
 
     def get_assessment(
         self,
@@ -242,8 +321,174 @@ class InMemoryAssessmentRepository:
 class SqlAlchemyAssessmentRepository:
     """PostgreSQL adapter that applies Task 5 transaction-local RLS context."""
 
+    _reservation_lease = timedelta(minutes=5)
+    _pending_poll_seconds = 0.05
+
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
+
+    def reserve_assessment(
+        self,
+        tenant_id: UUID,
+        idempotency_key: str,
+        request_hash: str,
+        provenance: dict[str, object],
+    ) -> AssessmentReservation:
+        while True:
+            should_wait = False
+            with self._engine.begin() as connection:
+                set_tenant_context(connection, tenant_id)
+                _lock_idempotency_key(connection, tenant_id, idempotency_key)
+                row = connection.execute(
+                    select(
+                        AssessmentRecord.domain_assessment_id,
+                        AssessmentRecord.assessment,
+                    ).where(
+                        AssessmentRecord.tenant_id == tenant_id,
+                        AssessmentRecord.idempotency_key == idempotency_key,
+                    )
+                ).one_or_none()
+                if row is None:
+                    assessment_id = str(uuid4())
+                    owner_token = str(uuid4())
+                    payload = _pending_payload(
+                        request_hash,
+                        owner_token,
+                        self._reservation_lease,
+                    )
+                    connection.execute(
+                        insert(AssessmentRecord).values(
+                            id=UUID(assessment_id),
+                            tenant_id=tenant_id,
+                            domain_assessment_id=assessment_id,
+                            idempotency_key=idempotency_key,
+                            assessment=payload,
+                            assessment_hash=request_hash,
+                            provenance=provenance,
+                        )
+                    )
+                    return AssessmentReservation(
+                        assessment_id=assessment_id,
+                        owner_token=owner_token,
+                        execute=True,
+                    )
+
+                assessment_id = row.domain_assessment_id
+                payload = row.assessment
+                if payload["request_hash"] != request_hash:
+                    raise IdempotencyConflict
+                if payload["state"] == "COMPLETED":
+                    return AssessmentReservation(
+                        assessment_id=assessment_id,
+                        owner_token="",
+                        execute=False,
+                        response=AssessmentResponse.model_validate(
+                            payload["response"]
+                        ),
+                    )
+                if payload["state"] == "FAILED" or _lease_expired(payload):
+                    owner_token = str(uuid4())
+                    connection.execute(
+                        update(AssessmentRecord)
+                        .where(
+                            AssessmentRecord.tenant_id == tenant_id,
+                            AssessmentRecord.idempotency_key == idempotency_key,
+                        )
+                        .values(
+                            assessment=_pending_payload(
+                                request_hash,
+                                owner_token,
+                                self._reservation_lease,
+                            ),
+                            assessment_hash=request_hash,
+                            provenance=provenance,
+                        )
+                    )
+                    return AssessmentReservation(
+                        assessment_id=assessment_id,
+                        owner_token=owner_token,
+                        execute=True,
+                    )
+                should_wait = True
+            if should_wait:
+                time.sleep(self._pending_poll_seconds)
+
+    def complete_assessment(
+        self,
+        tenant_id: UUID,
+        idempotency_key: str,
+        request_hash: str,
+        reservation: AssessmentReservation,
+        response: AssessmentResponse,
+    ) -> None:
+        with self._engine.begin() as connection:
+            set_tenant_context(connection, tenant_id)
+            _lock_idempotency_key(connection, tenant_id, idempotency_key)
+            payload = _load_reservation_payload(
+                connection,
+                tenant_id,
+                idempotency_key,
+            )
+            _require_database_reservation_owner(
+                payload,
+                request_hash,
+                reservation,
+            )
+            response_payload = response.model_dump(mode="json")
+            connection.execute(
+                update(AssessmentRecord)
+                .where(
+                    AssessmentRecord.tenant_id == tenant_id,
+                    AssessmentRecord.idempotency_key == idempotency_key,
+                )
+                .values(
+                    assessment={
+                        "state": "COMPLETED",
+                        "request_hash": request_hash,
+                        "response": response_payload,
+                    },
+                    assessment_hash=_json_hash(response_payload),
+                    provenance=response.provenance.model_dump(mode="json"),
+                )
+            )
+
+    def fail_assessment(
+        self,
+        tenant_id: UUID,
+        idempotency_key: str,
+        request_hash: str,
+        reservation: AssessmentReservation,
+    ) -> None:
+        with self._engine.begin() as connection:
+            set_tenant_context(connection, tenant_id)
+            _lock_idempotency_key(connection, tenant_id, idempotency_key)
+            payload = _load_reservation_payload(
+                connection,
+                tenant_id,
+                idempotency_key,
+            )
+            _require_database_reservation_owner(
+                payload,
+                request_hash,
+                reservation,
+            )
+            connection.execute(
+                update(AssessmentRecord)
+                .where(
+                    AssessmentRecord.tenant_id == tenant_id,
+                    AssessmentRecord.idempotency_key == idempotency_key,
+                )
+                .values(
+                    assessment={
+                        "state": "FAILED",
+                        "request_hash": request_hash,
+                        "retry_semantics": (
+                            "the next identical request reuses this assessment_id"
+                        ),
+                    },
+                    assessment_hash=request_hash,
+                )
+            )
 
     def save_engine_output(
         self,
@@ -276,54 +521,33 @@ class SqlAlchemyAssessmentRepository:
                 )
             )
 
-    def get_by_idempotency_key(
+    def get_engine_output(
         self,
         tenant_id: UUID,
-        idempotency_key: str,
-    ) -> StoredAssessment | None:
+        assessment_id: str,
+        engine_name: str,
+    ) -> StoredEngineOutput | None:
         with self._engine.begin() as connection:
             set_tenant_context(connection, tenant_id)
-            payload = connection.execute(
-                select(AssessmentRecord.assessment).where(
-                    AssessmentRecord.tenant_id == tenant_id,
-                    AssessmentRecord.idempotency_key == idempotency_key,
+            row = connection.execute(
+                select(
+                    EngineOutputRecord.output,
+                    EngineOutputRecord.output_hash,
+                    EngineOutputRecord.provenance,
+                ).where(
+                    EngineOutputRecord.tenant_id == tenant_id,
+                    EngineOutputRecord.assessment_id == assessment_id,
+                    EngineOutputRecord.engine_name == engine_name,
                 )
-            ).scalar_one_or_none()
-            return _stored_assessment(payload) if payload is not None else None
-
-    def save_assessment(
-        self,
-        tenant_id: UUID,
-        idempotency_key: str,
-        stored: StoredAssessment,
-    ) -> StoredAssessment:
-        with self._engine.begin() as connection:
-            set_tenant_context(connection, tenant_id)
-            _lock_idempotency_key(connection, tenant_id, idempotency_key)
-            prior_payload = connection.execute(
-                select(AssessmentRecord.assessment).where(
-                    AssessmentRecord.tenant_id == tenant_id,
-                    AssessmentRecord.idempotency_key == idempotency_key,
-                )
-            ).scalar_one_or_none()
-            if prior_payload is not None:
-                return _stored_assessment(prior_payload)
-            response_payload = stored.response.model_dump(mode="json")
-            connection.execute(
-                insert(AssessmentRecord).values(
-                    id=UUID(stored.response.assessment_id),
-                    tenant_id=tenant_id,
-                    domain_assessment_id=stored.response.assessment_id,
-                    idempotency_key=idempotency_key,
-                    assessment={
-                        "request_hash": stored.request_hash,
-                        "response": response_payload,
-                    },
-                    assessment_hash=_json_hash(response_payload),
-                    provenance=stored.response.provenance.model_dump(mode="json"),
-                )
+            ).one_or_none()
+            if row is None:
+                return None
+            return StoredEngineOutput(
+                engine_name=engine_name,
+                output=row.output,
+                output_hash=row.output_hash,
+                provenance=row.provenance,
             )
-            return stored
 
     def get_assessment(
         self,
@@ -339,6 +563,8 @@ class SqlAlchemyAssessmentRepository:
                 )
             ).scalar_one_or_none()
             if payload is None:
+                return None
+            if payload.get("state") != "COMPLETED":
                 return None
             return AssessmentResponse.model_validate(payload["response"])
 
@@ -407,6 +633,10 @@ class IdempotencyConflict(Exception):
     pass
 
 
+class ReservationStateError(RuntimeError):
+    pass
+
+
 class AssessmentService:
     def __init__(
         self,
@@ -425,77 +655,98 @@ class AssessmentService:
     ) -> AssessmentResponse:
         del actor_id  # Reserved for the durable audit adapter.
         request_hash = _model_hash(request)
-        prior = self._repository.get_by_idempotency_key(
+        reservation = self._repository.reserve_assessment(
             tenant_id,
             idempotency_key,
+            request_hash,
+            request.provenance.model_dump(mode="json"),
         )
-        if prior is not None:
-            if prior.request_hash != request_hash:
-                raise IdempotencyConflict
-            return prior.response
+        if not reservation.execute:
+            if reservation.response is None:
+                raise ReservationStateError("completed reservation has no response")
+            return reservation.response
 
-        assessment_id = str(uuid4())
-        engine_outputs: dict[str, BaseModel] = {}
-        for registration in self._engine_registry.registrations:
-            output = registration.run(request)
-            output_payload = output.model_dump(mode="json")
-            self._repository.save_engine_output(
-                tenant_id,
-                assessment_id,
-                StoredEngineOutput(
-                    engine_name=registration.name,
-                    output=output_payload,
-                    output_hash=_json_hash(output_payload),
-                    provenance=request.provenance.model_dump(mode="json"),
-                ),
-            )
-            engine_outputs[registration.name] = output
+        try:
+            assessment_id = reservation.assessment_id
+            engine_outputs: dict[str, BaseModel] = {}
+            for registration in self._engine_registry.registrations:
+                stored_output = self._repository.get_engine_output(
+                    tenant_id,
+                    assessment_id,
+                    registration.name,
+                )
+                if stored_output is None:
+                    output = registration.run(request)
+                    output_payload = output.model_dump(mode="json")
+                    self._repository.save_engine_output(
+                        tenant_id,
+                        assessment_id,
+                        StoredEngineOutput(
+                            engine_name=registration.name,
+                            output=output_payload,
+                            output_hash=_json_hash(output_payload),
+                            provenance=request.provenance.model_dump(mode="json"),
+                        ),
+                    )
+                else:
+                    output = registration.output_model.model_validate(
+                        stored_output.output
+                    )
+                engine_outputs[registration.name] = output
 
-        economics_output = engine_outputs.get("economics")
-        if not isinstance(economics_output, EconomicsAssessment):
-            raise EngineContractError(
-                "registry must provide an EconomicsAssessment named 'economics'"
+            economics_output = engine_outputs.get("economics")
+            if not isinstance(economics_output, EconomicsAssessment):
+                raise EngineContractError(
+                    "registry must provide an EconomicsAssessment named 'economics'"
+                )
+            economics = economics_output
+            gate_results = evaluate_gates(
+                GateContext(
+                    requested_decision=request.requested_decision,
+                    assessment_id=assessment_id,
+                    economics_assessment=economics,
+                    compliance_passed=request.compliance_passed,
+                    liquidity_passed=request.liquidity_passed,
+                    data_quality_passed=request.data_quality_passed,
+                    sample_size_passed=request.sample_size_passed,
+                    operational_recency_passed=request.operational_recency_passed,
+                    stop_loss_registered=request.stop_loss_registered,
+                    human_approval=None,
+                )
             )
-        economics = economics_output
-        gate_results = evaluate_gates(
-            GateContext(
-                requested_decision=request.requested_decision,
+            response = AssessmentResponse(
                 assessment_id=assessment_id,
-                economics_assessment=economics,
-                compliance_passed=request.compliance_passed,
-                liquidity_passed=request.liquidity_passed,
-                data_quality_passed=request.data_quality_passed,
-                sample_size_passed=request.sample_size_passed,
-                operational_recency_passed=request.operational_recency_passed,
-                stop_loss_registered=request.stop_loss_registered,
-                human_approval=None,
+                data=AssessmentData(
+                    economics=economics,
+                    gate_results=gate_results,
+                ),
+                decision_reasons=economics.decision_reasons,
+                missingness_status=economics.missingness_status,
+                data_quality_status=(
+                    DataQualityStatus.GOOD
+                    if request.data_quality_passed
+                    else DataQualityStatus.POOR
+                ),
+                review_status=ReviewStatus.PENDING,
+                uncertainty=economics.uncertainty,
+                provenance=request.provenance,
             )
-        )
-        response = AssessmentResponse(
-            assessment_id=assessment_id,
-            data=AssessmentData(
-                economics=economics,
-                gate_results=gate_results,
-            ),
-            decision_reasons=economics.decision_reasons,
-            missingness_status=economics.missingness_status,
-            data_quality_status=(
-                DataQualityStatus.GOOD
-                if request.data_quality_passed
-                else DataQualityStatus.POOR
-            ),
-            review_status=ReviewStatus.PENDING,
-            uncertainty=economics.uncertainty,
-            provenance=request.provenance,
-        )
-        stored = self._repository.save_assessment(
-            tenant_id,
-            idempotency_key,
-            StoredAssessment(request_hash=request_hash, response=response),
-        )
-        if stored.request_hash != request_hash:
-            raise IdempotencyConflict
-        return stored.response
+            self._repository.complete_assessment(
+                tenant_id,
+                idempotency_key,
+                request_hash,
+                reservation,
+                response,
+            )
+            return response
+        except Exception:
+            self._repository.fail_assessment(
+                tenant_id,
+                idempotency_key,
+                request_hash,
+                reservation,
+            )
+            raise
 
     def get_assessment(
         self,
@@ -567,6 +818,7 @@ def foundation_engine_registry() -> EngineRegistry:
                     request.economics,
                     request.provenance,
                 ),
+                output_model=EconomicsAssessment,
             ),
         )
     )
@@ -587,11 +839,83 @@ def _json_hash(payload: object) -> str:
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _stored_assessment(payload: dict[str, Any]) -> StoredAssessment:
-    return StoredAssessment(
-        request_hash=str(payload["request_hash"]),
-        response=AssessmentResponse.model_validate(payload["response"]),
+def _memory_reservation(
+    stored: _MemoryReservation,
+    *,
+    execute: bool,
+) -> AssessmentReservation:
+    return AssessmentReservation(
+        assessment_id=stored.assessment_id,
+        owner_token=stored.owner_token if execute else "",
+        execute=execute,
+        response=deepcopy(stored.response),
     )
+
+
+def _require_reservation_owner(
+    stored: _MemoryReservation,
+    request_hash: str,
+    reservation: AssessmentReservation,
+) -> None:
+    if stored.request_hash != request_hash:
+        raise IdempotencyConflict
+    if (
+        stored.state != "PENDING"
+        or stored.assessment_id != reservation.assessment_id
+        or stored.owner_token != reservation.owner_token
+    ):
+        raise ReservationStateError("assessment reservation ownership was lost")
+
+
+def _pending_payload(
+    request_hash: str,
+    owner_token: str,
+    lease: timedelta,
+) -> dict[str, object]:
+    return {
+        "state": "PENDING",
+        "request_hash": request_hash,
+        "owner_token": owner_token,
+        "lease_expires_at": (datetime.now(UTC) + lease).isoformat(),
+        "retry_semantics": (
+            "a failed or expired owner is retried with the same assessment_id"
+        ),
+    }
+
+
+def _lease_expired(payload: dict[str, Any]) -> bool:
+    lease_expires_at = datetime.fromisoformat(str(payload["lease_expires_at"]))
+    return lease_expires_at <= datetime.now(UTC)
+
+
+def _load_reservation_payload(
+    connection: Connection,
+    tenant_id: UUID,
+    idempotency_key: str,
+) -> dict[str, Any]:
+    payload = connection.execute(
+        select(AssessmentRecord.assessment).where(
+            AssessmentRecord.tenant_id == tenant_id,
+            AssessmentRecord.idempotency_key == idempotency_key,
+        )
+    ).scalar_one_or_none()
+    if payload is None:
+        raise ReservationStateError("assessment reservation is missing")
+    return cast(dict[str, Any], payload)
+
+
+def _require_database_reservation_owner(
+    payload: dict[str, Any],
+    request_hash: str,
+    reservation: AssessmentReservation,
+) -> None:
+    if payload["request_hash"] != request_hash:
+        raise IdempotencyConflict
+    if (
+        payload["state"] != "PENDING"
+        or payload["owner_token"] != reservation.owner_token
+    ):
+        raise ReservationStateError("assessment reservation ownership was lost")
 
 
 def _stored_approval(record: Row[Any]) -> StoredApproval:

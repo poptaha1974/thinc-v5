@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event, Lock
 from typing import Annotated
 from uuid import UUID, uuid4
 
@@ -9,21 +11,52 @@ from sqlalchemy import text
 
 from tests.integration.db.conftest import MigratedDatabase
 from thinc_v5.api.app import create_app
-from thinc_v5.api.routes.assessments import TestIdentity
 from thinc_v5.db.session import set_tenant_context
 from thinc_v5.decision.service import (
+    AssessmentInput,
+    AssessmentReservation,
+    EngineRegistration,
+    EngineRegistry,
     InMemoryAssessmentRepository,
     SqlAlchemyAssessmentRepository,
 )
+from thinc_v5.domain.economics import EconomicsAssessment
+from thinc_v5.engines.economics import EconomicsEngine
 
 pytest_plugins = ("tests.integration.db.conftest",)
+
+
+class ReservationObservingPostgresRepository(SqlAlchemyAssessmentRepository):
+    def __init__(self, engine) -> None:
+        super().__init__(engine)
+        self._reservation_lock = Lock()
+        self.reservation_calls = 0
+        self.second_reservation_started = Event()
+
+    def reserve_assessment(
+        self,
+        tenant_id: UUID,
+        idempotency_key: str,
+        request_hash: str,
+        provenance: dict[str, object],
+    ) -> AssessmentReservation:
+        with self._reservation_lock:
+            self.reservation_calls += 1
+            if self.reservation_calls == 2:
+                self.second_reservation_started.set()
+        return super().reserve_assessment(
+            tenant_id,
+            idempotency_key,
+            request_hash,
+            provenance,
+        )
 
 
 def injected_test_identity(
     x_tenant_id: Annotated[UUID, Header(alias="X-Tenant-ID")],
     x_test_identity: Annotated[str, Header(alias="X-Test-Identity")],
-) -> TestIdentity:
-    return TestIdentity(tenant_id=x_tenant_id, actor_id=x_test_identity)
+) -> dict[str, object]:
+    return {"tenant_id": x_tenant_id, "actor_id": x_test_identity}
 
 
 def build_client() -> TestClient:
@@ -236,3 +269,94 @@ def test_postgresql_repository_persists_assessment_under_rls(
     assert len(stored_outputs) == 1
     assert stored_outputs[0].engine_name == "economics"
     assert stored_outputs[0].output["delivered_contribution_profit"] == "300"
+
+
+def test_postgresql_concurrent_idempotency_has_one_executor_and_no_orphans(
+    migrated_database: MigratedDatabase,
+) -> None:
+    tenant_id = uuid4()
+    with migrated_database.migration_engine.begin() as connection:
+        connection.execute(
+            text("INSERT INTO tenants (id, slug, name) VALUES (:id, :slug, :name)"),
+            {"id": tenant_id, "slug": f"tenant-{tenant_id}", "name": "Tenant"},
+        )
+    repository = ReservationObservingPostgresRepository(
+        migrated_database.app_engine
+    )
+    engine_started = Event()
+    release_engine = Event()
+    execution_lock = Lock()
+    executions = 0
+    economics_engine = EconomicsEngine()
+
+    def blocking_economics(request: AssessmentInput):
+        nonlocal executions
+        with execution_lock:
+            executions += 1
+        engine_started.set()
+        assert release_engine.wait(timeout=5)
+        return economics_engine.assess(request.economics, request.provenance)
+
+    client = TestClient(
+        create_app(
+            repository=repository,
+            identity_provider=injected_test_identity,
+            engine_registry=EngineRegistry(
+                (
+                    EngineRegistration(
+                        name="economics",
+                        run=blocking_economics,
+                        output_model=EconomicsAssessment,
+                    ),
+                )
+            ),
+        )
+    )
+    headers = {
+        "X-Tenant-ID": str(tenant_id),
+        "X-Test-Identity": "researcher-pg",
+        "Idempotency-Key": "postgres-concurrent-key",
+    }
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(
+            client.post,
+            "/v1/assessments",
+            headers=headers,
+            json=complete_assessment_payload(),
+        )
+        assert engine_started.wait(timeout=5)
+        second = executor.submit(
+            client.post,
+            "/v1/assessments",
+            headers=headers,
+            json=complete_assessment_payload(),
+        )
+        try:
+            assert repository.second_reservation_started.wait(timeout=5)
+        finally:
+            release_engine.set()
+        responses = [first.result(timeout=5), second.result(timeout=5)]
+
+    assert [response.status_code for response in responses] == [201, 201]
+    assessment_id = responses[0].json()["assessment_id"]
+    assert assessment_id == responses[1].json()["assessment_id"]
+    assert executions == 1
+    with migrated_database.app_engine.begin() as connection:
+        set_tenant_context(connection, tenant_id)
+        assessment_count = connection.execute(
+            text(
+                "SELECT count(*) FROM assessment_records "
+                "WHERE idempotency_key = :key"
+            ),
+            {"key": "postgres-concurrent-key"},
+        ).scalar_one()
+        output_count = connection.execute(
+            text(
+                "SELECT count(*) FROM engine_output_records "
+                "WHERE assessment_id = :assessment_id"
+            ),
+            {"assessment_id": assessment_id},
+        ).scalar_one()
+    assert assessment_count == 1
+    assert output_count == 1

@@ -6,15 +6,14 @@ from uuid import UUID
 from fastapi import Header
 
 from thinc_v5.api.app import create_app
-from thinc_v5.api.routes.assessments import TestIdentity
 from thinc_v5.decision.service import InMemoryAssessmentRepository
 
 
 def injected_test_identity(
     x_tenant_id: Annotated[UUID, Header(alias="X-Tenant-ID")],
     x_test_identity: Annotated[str, Header(alias="X-Test-Identity")],
-) -> TestIdentity:
-    return TestIdentity(tenant_id=x_tenant_id, actor_id=x_test_identity)
+) -> dict[str, object]:
+    return {"tenant_id": x_tenant_id, "actor_id": x_test_identity}
 
 
 def test_assessment_api_openapi_matches_committed_contract() -> None:
@@ -36,13 +35,14 @@ def test_openapi_declares_rfc_9457_problem_responses() -> None:
     )
     paths = app.openapi()["paths"]
     expected_statuses = {
-        ("/v1/assessments", "post"): {"400", "409", "422"},
-        ("/v1/assessments/{assessment_id}", "get"): {"404", "422"},
+        ("/v1/assessments", "post"): {"400", "409", "422", "500"},
+        ("/v1/assessments/{assessment_id}", "get"): {"404", "422", "500"},
         ("/v1/assessments/{assessment_id}/approvals", "post"): {
             "400",
             "404",
             "409",
             "422",
+            "500",
         },
     }
 

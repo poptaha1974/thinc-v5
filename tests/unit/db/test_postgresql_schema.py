@@ -115,6 +115,17 @@ def test_engine_outputs_are_independent_tenant_owned_records() -> None:
             "engine_name",
         ).columns
     } == {"tenant_id", "assessment_id", "engine_name"}
+    foreign_keys = [
+        constraint
+        for constraint in table.constraints
+        if isinstance(constraint, ForeignKeyConstraint)
+        and constraint.referred_table is AssessmentRecord.__table__
+    ]
+    assert len(foreign_keys) == 1
+    assert [column.name for column in foreign_keys[0].columns] == [
+        "tenant_id",
+        "assessment_id",
+    ]
 
 
 def test_persistence_models_are_not_domain_models() -> None:

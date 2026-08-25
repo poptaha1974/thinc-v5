@@ -4,11 +4,11 @@ from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from thinc_v5.api.routes.assessments import (
     IdentityProvider,
+    IdentityValidationError,
     ProblemDetails,
     create_assessment_router,
 )
@@ -60,17 +60,17 @@ def create_app(
             errors=jsonable_encoder(error.errors()),
         )
 
-    @app.exception_handler(ValidationError)
+    @app.exception_handler(IdentityValidationError)
     async def identity_validation_problem(
         request: Request,
-        error: ValidationError,
+        error: IdentityValidationError,
     ) -> JSONResponse:
         return _problem(
             request=request,
             status_code=422,
             title="Request validation failed",
             detail="The request did not satisfy the API contract.",
-            errors=jsonable_encoder(error.errors()),
+            errors=jsonable_encoder(error.errors),
         )
 
     @app.exception_handler(StarletteHTTPException)
@@ -108,6 +108,19 @@ def create_app(
             status_code=409,
             title="Idempotency conflict",
             detail="The idempotency key was already used for another request.",
+        )
+
+    @app.exception_handler(Exception)
+    async def internal_problem(
+        request: Request,
+        error: Exception,
+    ) -> JSONResponse:
+        del error
+        return _problem(
+            request=request,
+            status_code=500,
+            title="Internal server error",
+            detail="An internal error occurred.",
         )
 
     return app

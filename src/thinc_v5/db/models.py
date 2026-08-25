@@ -116,6 +116,15 @@ class EngineOutputRecord(IdMixin, TenantOwnedMixin, CreatedAtMixin, Base):
                 "uq_engine_output_records_tenant_id_assessment_id_engine_name"
             ),
         ),
+        ForeignKeyConstraint(
+            ["tenant_id", "assessment_id"],
+            [
+                "assessment_records.tenant_id",
+                "assessment_records.domain_assessment_id",
+            ],
+            name="fk_engine_output_records_assessment_tenant",
+            ondelete="CASCADE",
+        ),
     )
 
     assessment_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
