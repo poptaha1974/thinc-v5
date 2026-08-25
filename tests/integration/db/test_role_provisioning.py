@@ -9,7 +9,7 @@ from sqlalchemy.engine import make_url
 
 from alembic import command
 
-from .conftest import alembic_config, safe_downgrade
+from .fixtures import alembic_config, safe_downgrade
 
 
 def test_migration_rejects_missing_app_role(

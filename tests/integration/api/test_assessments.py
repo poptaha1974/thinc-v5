@@ -4,7 +4,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from threading import Event, Lock, Thread, current_thread
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 from uuid import UUID, uuid4
 
 import pytest
@@ -13,7 +13,6 @@ from fastapi.testclient import TestClient
 from sqlalchemy import exc, text
 
 import thinc_v5.decision.service as service_module
-from tests.integration.db.conftest import MigratedDatabase
 from thinc_v5.api.app import create_app
 from thinc_v5.db.session import set_tenant_context
 from thinc_v5.decision.service import (
@@ -29,7 +28,8 @@ from thinc_v5.decision.service import (
 from thinc_v5.domain.economics import EconomicsAssessment
 from thinc_v5.engines.economics import EconomicsEngine
 
-pytest_plugins = ("tests.integration.db.conftest",)
+if TYPE_CHECKING:
+    from tests.integration.db.fixtures import MigratedDatabase
 
 
 class ReservationObservingPostgresRepository(SqlAlchemyAssessmentRepository):

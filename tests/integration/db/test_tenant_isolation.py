@@ -12,7 +12,7 @@ from alembic import command
 from thinc_v5.db.models import BUSINESS_TABLE_NAMES, RLS_TABLE_NAMES
 from thinc_v5.db.session import set_tenant_context
 
-from .conftest import PROJECT_ROOT, MigratedDatabase, alembic_config, safe_downgrade
+from .fixtures import PROJECT_ROOT, MigratedDatabase, alembic_config, safe_downgrade
 
 
 def test_offline_migration_enables_and_forces_rls_for_every_business_table() -> None:

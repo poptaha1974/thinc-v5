@@ -4,7 +4,7 @@ import pytest
 
 from thinc_v5.db.migration_config import configure_alembic_url
 
-from .conftest import (
+from .fixtures import (
     _require_disposable_database,
     _require_ephemeral_role_test_cluster,
     alembic_config,

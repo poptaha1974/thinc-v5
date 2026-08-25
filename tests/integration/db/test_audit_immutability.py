@@ -10,7 +10,7 @@ from sqlalchemy import exc, text
 from alembic import command
 from thinc_v5.db.session import set_tenant_context
 
-from .conftest import PROJECT_ROOT, MigratedDatabase
+from .fixtures import PROJECT_ROOT, MigratedDatabase
 
 
 def test_offline_migration_enforces_append_only_audit_events() -> None:
