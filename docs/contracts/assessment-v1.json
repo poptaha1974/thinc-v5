@@ -1,0 +1,165 @@
+{
+  "$defs": {
+    "DataQualityStatus": {
+      "enum": [
+        "POOR",
+        "ACCEPTABLE",
+        "GOOD"
+      ],
+      "title": "DataQualityStatus",
+      "type": "string"
+    },
+    "MissingnessStatus": {
+      "enum": [
+        "NOT_COLLECTED",
+        "PARTIAL",
+        "COMPLETE"
+      ],
+      "title": "MissingnessStatus",
+      "type": "string"
+    },
+    "Provenance": {
+      "properties": {
+        "engine_commit": {
+          "title": "Engine Commit",
+          "type": "string"
+        },
+        "evidence_as_of": {
+          "format": "date-time",
+          "title": "Evidence As Of",
+          "type": "string"
+        },
+        "generated_at": {
+          "format": "date-time",
+          "title": "Generated At",
+          "type": "string"
+        },
+        "market": {
+          "const": "EG",
+          "title": "Market",
+          "type": "string"
+        },
+        "model_version": {
+          "title": "Model Version",
+          "type": "string"
+        },
+        "schema_version": {
+          "pattern": "^\\d+\\.\\d+\\.\\d+$",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Source Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "schema_version",
+        "model_version",
+        "engine_commit",
+        "generated_at",
+        "evidence_as_of",
+        "market",
+        "source_ids"
+      ],
+      "title": "Provenance",
+      "type": "object"
+    },
+    "ReviewStatus": {
+      "enum": [
+        "PENDING",
+        "APPROVED",
+        "REJECTED"
+      ],
+      "title": "ReviewStatus",
+      "type": "string"
+    },
+    "Uncertainty": {
+      "properties": {
+        "lower": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lower"
+        },
+        "method": {
+          "title": "Method",
+          "type": "string"
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Notes",
+          "type": "array"
+        },
+        "upper": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Upper"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "title": "Uncertainty",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "data": {
+      "additionalProperties": true,
+      "title": "Data",
+      "type": "object"
+    },
+    "data_quality_status": {
+      "$ref": "#/$defs/DataQualityStatus"
+    },
+    "missingness_status": {
+      "$ref": "#/$defs/MissingnessStatus"
+    },
+    "provenance": {
+      "$ref": "#/$defs/Provenance"
+    },
+    "review_status": {
+      "$ref": "#/$defs/ReviewStatus"
+    },
+    "uncertainty": {
+      "$ref": "#/$defs/Uncertainty"
+    }
+  },
+  "required": [
+    "data",
+    "missingness_status",
+    "data_quality_status",
+    "review_status",
+    "uncertainty",
+    "provenance"
+  ],
+  "title": "ResearchPreviewResult[dict]",
+  "type": "object"
+}
