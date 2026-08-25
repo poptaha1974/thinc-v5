@@ -55,6 +55,23 @@ def test_provenance_requires_source_ids() -> None:
         raise AssertionError("source_ids must not be empty")
 
 
+def test_provenance_rejects_empty_source_id_entries() -> None:
+    try:
+        Provenance(
+            schema_version="1.0.0",
+            model_version="research-preview.1",
+            engine_commit="abc1234",
+            generated_at=datetime.now(UTC),
+            evidence_as_of=datetime.now(UTC),
+            market="EG",
+            source_ids=[""],
+        )
+    except ValidationError as exc:
+        assert "source_ids" in str(exc)
+    else:
+        raise AssertionError("source_ids entries must not be empty")
+
+
 def test_provenance_requires_timezone_aware_dates_semver_and_eg_market() -> None:
     try:
         Provenance.model_validate(
@@ -90,9 +107,51 @@ def test_uncertainty_defaults_notes_and_supports_bounds() -> None:
     assert uncertainty.notes == []
 
 
+def test_uncertainty_rejects_empty_method_and_note_entries() -> None:
+    try:
+        Uncertainty(method="", notes=[""])
+    except ValidationError as exc:
+        message = str(exc)
+        assert "method" in message
+        assert "notes" in message
+    else:
+        raise AssertionError("uncertainty strings must not be empty")
+
+
+def test_research_preview_result_requires_decision_reasons() -> None:
+    try:
+        ResearchPreviewResult[dict[str, str]].model_validate(
+            {
+                "data": {"symbol": "EGX30"},
+                "missingness_status": MissingnessStatus.COMPLETE,
+                "data_quality_status": DataQualityStatus.GOOD,
+                "review_status": ReviewStatus.PENDING,
+                "uncertainty": Uncertainty(
+                    method="range",
+                    lower=Decimal("10.0"),
+                    upper=Decimal("12.0"),
+                ),
+                "provenance": Provenance(
+                    schema_version="1.0.0",
+                    model_version="research-preview.1",
+                    engine_commit="abc1234",
+                    generated_at=datetime.now(UTC),
+                    evidence_as_of=datetime.now(UTC),
+                    market="EG",
+                    source_ids=["source-1"],
+                ),
+            }
+        )
+    except ValidationError as exc:
+        assert "decision_reasons" in str(exc)
+    else:
+        raise AssertionError("decision_reasons must be required")
+
+
 def test_research_preview_result_wraps_payload_and_contract_metadata() -> None:
     result = ResearchPreviewResult[dict[str, str]](
         data={"symbol": "EGX30"},
+        decision_reasons=["Liquidity screen passed"],
         missingness_status=MissingnessStatus.COMPLETE,
         data_quality_status=DataQualityStatus.GOOD,
         review_status=ReviewStatus.PENDING,
@@ -120,6 +179,7 @@ def test_research_preview_result_wraps_payload_and_contract_metadata() -> None:
     provenance = dumped["provenance"]
 
     assert data == {"symbol": "EGX30"}
+    assert dumped["decision_reasons"] == ["Liquidity screen passed"]
     assert dumped["missingness_status"] == "COMPLETE"
     assert dumped["data_quality_status"] == "GOOD"
     assert dumped["review_status"] == "PENDING"

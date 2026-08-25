@@ -21,6 +21,8 @@
     "Provenance": {
       "properties": {
         "engine_commit": {
+          "minLength": 1,
+          "pattern": ".*\\S.*",
           "title": "Engine Commit",
           "type": "string"
         },
@@ -40,6 +42,8 @@
           "type": "string"
         },
         "model_version": {
+          "minLength": 1,
+          "pattern": ".*\\S.*",
           "title": "Model Version",
           "type": "string"
         },
@@ -50,8 +54,11 @@
         },
         "source_ids": {
           "items": {
+            "minLength": 1,
+            "pattern": ".*\\S.*",
             "type": "string"
           },
+          "minItems": 1,
           "title": "Source Ids",
           "type": "array"
         }
@@ -96,11 +103,15 @@
           "title": "Lower"
         },
         "method": {
+          "minLength": 1,
+          "pattern": ".*\\S.*",
           "title": "Method",
           "type": "string"
         },
         "notes": {
           "items": {
+            "minLength": 1,
+            "pattern": ".*\\S.*",
             "type": "string"
           },
           "title": "Notes",
@@ -139,6 +150,15 @@
     "data_quality_status": {
       "$ref": "#/$defs/DataQualityStatus"
     },
+    "decision_reasons": {
+      "items": {
+        "minLength": 1,
+        "pattern": ".*\\S.*",
+        "type": "string"
+      },
+      "title": "Decision Reasons",
+      "type": "array"
+    },
     "missingness_status": {
       "$ref": "#/$defs/MissingnessStatus"
     },
@@ -154,6 +174,7 @@
   },
   "required": [
     "data",
+    "decision_reasons",
     "missingness_status",
     "data_quality_status",
     "review_status",

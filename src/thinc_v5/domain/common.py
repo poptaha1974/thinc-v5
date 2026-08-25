@@ -3,11 +3,19 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 SEMVER_PATTERN = r"^\d+\.\d+\.\d+$"
+NON_BLANK_TEXT = StringConstraints(min_length=1, pattern=r".*\S.*")
+NonBlankStr = Annotated[str, NON_BLANK_TEXT]
 
 
 class MissingnessStatus(str, Enum):
@@ -29,17 +37,10 @@ class ReviewStatus(str, Enum):
 
 
 class Uncertainty(BaseModel):
-    method: str
+    method: NonBlankStr
     lower: Decimal | None = None
     upper: Decimal | None = None
-    notes: list[str] = Field(default_factory=list)
-
-    @field_validator("method")
-    @classmethod
-    def require_method(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("method must not be empty")
-        return value
+    notes: list[NonBlankStr] = Field(default_factory=list)
 
     @field_validator("notes")
     @classmethod
@@ -61,16 +62,16 @@ class Uncertainty(BaseModel):
 
 class Provenance(BaseModel):
     schema_version: str = Field(pattern=SEMVER_PATTERN)
-    model_version: str
-    engine_commit: str
+    model_version: NonBlankStr
+    engine_commit: NonBlankStr
     generated_at: datetime
     evidence_as_of: datetime
     market: Literal["EG"]
-    source_ids: list[str]
+    source_ids: list[NonBlankStr] = Field(min_length=1)
 
-    @field_validator("schema_version", "model_version", "engine_commit")
+    @field_validator("schema_version")
     @classmethod
-    def require_nonempty_strings(cls, value: str) -> str:
+    def require_nonempty_schema_version(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("value must not be empty")
         return value
@@ -94,6 +95,7 @@ class Provenance(BaseModel):
 
 class ResearchPreviewResult[PayloadT](BaseModel):
     data: PayloadT
+    decision_reasons: list[NonBlankStr]
     missingness_status: MissingnessStatus
     data_quality_status: DataQualityStatus
     review_status: ReviewStatus
