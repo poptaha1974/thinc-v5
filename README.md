@@ -1,2 +1,24 @@
-# thinc-v5
-THINC v5 Research &amp; Business Intelligence Platform — Egyptian e-commerce decision support and scientific validation.
+# THINC v5
+
+منصة بحث وذكاء أعمال لدعم قرارات التجارة الإلكترونية وريادة الأعمال في السوق المصري.
+
+## الحالة
+
+**Research Preview — Design Phase**
+
+لا تُعد مخرجات THINC احتمال نجاح أو توصية مالية آلية قبل اكتمال التحقق الميداني والزمني والخارجي.
+
+## الوثائق
+
+- [المواصفة المعمارية والعلمية المعتمدة](docs/specs/THINC_V5_PLATFORM_DESIGN_AR.md)
+
+## المبادئ
+
+- محركات مستقلة للسوق والمنتج والاقتصاديات والعرض والمحتوى والإعلانات والتشغيل والعلامة التجارية والتعلم.
+- بوابات قرار تمنع التوسع عند فشل الامتثال أو الاقتصاديات أو جودة البيانات.
+- موافقة بشرية إلزامية للقرارات عالية الأثر.
+- توثيق المصدر والتاريخ وجودة البيانات وعدم اليقين لكل نتيجة.
+
+## الملكية
+
+Proprietary — Dr. Ehab Taha / Egy-Pioneers. No license is granted by default.
