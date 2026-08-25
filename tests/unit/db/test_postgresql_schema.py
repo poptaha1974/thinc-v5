@@ -86,6 +86,17 @@ def test_assessment_references_include_tenant_in_foreign_key() -> None:
         ]
 
 
+def test_api_post_idempotency_keys_are_unique_within_each_tenant() -> None:
+    for model in (AssessmentRecord, HumanApprovalRecord):
+        table = cast(Table, model.__table__)
+
+        assert table.c.idempotency_key.nullable is True
+        assert {
+            column.name
+            for column in _unique(table, "tenant_id", "idempotency_key").columns
+        } == {"tenant_id", "idempotency_key"}
+
+
 def test_persistence_models_are_not_domain_models() -> None:
     from pydantic import BaseModel
 

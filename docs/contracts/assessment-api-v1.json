@@ -1,0 +1,837 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "THINC v5 Research Preview API",
+    "description": "Foundation-only Research Preview API. Production authentication is not implemented; deployment is unsafe.",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/v1/assessments": {
+      "post": {
+        "tags": [
+          "assessments"
+        ],
+        "summary": "Create Assessment",
+        "operationId": "create_assessment_v1_assessments_post",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
+              "pattern": ".*\\S.*",
+              "title": "Idempotency-Key"
+            }
+          },
+          {
+            "name": "X-Tenant-ID",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "X-Tenant-Id"
+            }
+          },
+          {
+            "name": "X-Test-Identity",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-Test-Identity"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssessmentInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssessmentResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/assessments/{assessment_id}": {
+      "get": {
+        "tags": [
+          "assessments"
+        ],
+        "summary": "Get Assessment",
+        "operationId": "get_assessment_v1_assessments__assessment_id__get",
+        "parameters": [
+          {
+            "name": "assessment_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Assessment Id"
+            }
+          },
+          {
+            "name": "X-Tenant-ID",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "X-Tenant-Id"
+            }
+          },
+          {
+            "name": "X-Test-Identity",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-Test-Identity"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssessmentResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/assessments/{assessment_id}/approvals": {
+      "post": {
+        "tags": [
+          "assessments"
+        ],
+        "summary": "Approve Assessment",
+        "operationId": "approve_assessment_v1_assessments__assessment_id__approvals_post",
+        "parameters": [
+          {
+            "name": "assessment_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Assessment Id"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
+              "pattern": ".*\\S.*",
+              "title": "Idempotency-Key"
+            }
+          },
+          {
+            "name": "X-Tenant-ID",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "X-Tenant-Id"
+            }
+          },
+          {
+            "name": "X-Test-Identity",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "X-Test-Identity"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApprovalInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HumanApproval"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ApprovalInput": {
+        "properties": {
+          "approved_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approved At"
+          }
+        },
+        "type": "object",
+        "title": "ApprovalInput"
+      },
+      "AssessmentData": {
+        "properties": {
+          "economics": {
+            "$ref": "#/components/schemas/EconomicsAssessment"
+          },
+          "gate_results": {
+            "items": {
+              "$ref": "#/components/schemas/GateResult"
+            },
+            "type": "array",
+            "title": "Gate Results"
+          }
+        },
+        "type": "object",
+        "required": [
+          "economics",
+          "gate_results"
+        ],
+        "title": "AssessmentData"
+      },
+      "AssessmentInput": {
+        "properties": {
+          "economics": {
+            "$ref": "#/components/schemas/EconomicsInput"
+          },
+          "requested_decision": {
+            "$ref": "#/components/schemas/Decision"
+          },
+          "compliance_passed": {
+            "type": "boolean",
+            "title": "Compliance Passed"
+          },
+          "liquidity_passed": {
+            "type": "boolean",
+            "title": "Liquidity Passed"
+          },
+          "data_quality_passed": {
+            "type": "boolean",
+            "title": "Data Quality Passed"
+          },
+          "sample_size_passed": {
+            "type": "boolean",
+            "title": "Sample Size Passed"
+          },
+          "operational_recency_passed": {
+            "type": "boolean",
+            "title": "Operational Recency Passed"
+          },
+          "stop_loss_registered": {
+            "type": "boolean",
+            "title": "Stop Loss Registered",
+            "default": false
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/Provenance"
+          }
+        },
+        "type": "object",
+        "required": [
+          "economics",
+          "requested_decision",
+          "compliance_passed",
+          "liquidity_passed",
+          "data_quality_passed",
+          "sample_size_passed",
+          "operational_recency_passed",
+          "provenance"
+        ],
+        "title": "AssessmentInput"
+      },
+      "AssessmentResponse": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/AssessmentData"
+          },
+          "decision_reasons": {
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": ".*\\S.*"
+            },
+            "type": "array",
+            "title": "Decision Reasons"
+          },
+          "missingness_status": {
+            "$ref": "#/components/schemas/MissingnessStatus"
+          },
+          "data_quality_status": {
+            "$ref": "#/components/schemas/DataQualityStatus"
+          },
+          "review_status": {
+            "$ref": "#/components/schemas/ReviewStatus"
+          },
+          "uncertainty": {
+            "$ref": "#/components/schemas/Uncertainty"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/Provenance"
+          },
+          "assessment_id": {
+            "type": "string",
+            "title": "Assessment Id"
+          },
+          "status": {
+            "type": "string",
+            "const": "Research Preview",
+            "title": "Status",
+            "default": "Research Preview"
+          }
+        },
+        "type": "object",
+        "required": [
+          "data",
+          "decision_reasons",
+          "missingness_status",
+          "data_quality_status",
+          "review_status",
+          "uncertainty",
+          "provenance",
+          "assessment_id"
+        ],
+        "title": "AssessmentResponse"
+      },
+      "DataQualityStatus": {
+        "type": "string",
+        "enum": [
+          "POOR",
+          "ACCEPTABLE",
+          "GOOD"
+        ],
+        "title": "DataQualityStatus"
+      },
+      "Decision": {
+        "type": "string",
+        "enum": [
+          "RESEARCH",
+          "TEST",
+          "FIX",
+          "HOLD",
+          "REPOSITION",
+          "SCALE",
+          "KILL"
+        ],
+        "title": "Decision"
+      },
+      "EconomicsAssessment": {
+        "properties": {
+          "delivered_contribution_profit": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delivered Contribution Profit"
+          },
+          "profit_per_delivered_order": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profit Per Delivered Order"
+          },
+          "decision_reasons": {
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": ".*\\S.*"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Decision Reasons"
+          },
+          "missingness_status": {
+            "$ref": "#/components/schemas/MissingnessStatus"
+          },
+          "uncertainty": {
+            "$ref": "#/components/schemas/Uncertainty"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/Provenance"
+          }
+        },
+        "type": "object",
+        "required": [
+          "delivered_contribution_profit",
+          "profit_per_delivered_order",
+          "decision_reasons",
+          "missingness_status",
+          "uncertainty",
+          "provenance"
+        ],
+        "title": "EconomicsAssessment"
+      },
+      "EconomicsInput": {
+        "properties": {
+          "collected_revenue": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Collected Revenue"
+          },
+          "product_cost": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Cost"
+          },
+          "ad_spend": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ad Spend"
+          },
+          "shipping": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Shipping"
+          },
+          "collection_fees": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Collection Fees"
+          },
+          "return_cost": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Return Cost"
+          },
+          "variable_operations_cost": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Variable Operations Cost"
+          },
+          "delivered_orders": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Delivered Orders"
+          }
+        },
+        "type": "object",
+        "required": [
+          "delivered_orders"
+        ],
+        "title": "EconomicsInput"
+      },
+      "GateName": {
+        "type": "string",
+        "enum": [
+          "COMPLIANCE",
+          "LIQUIDITY",
+          "DELIVERED_PROFIT",
+          "DATA_QUALITY",
+          "SAMPLE_SIZE",
+          "OPERATIONAL_RECENCY",
+          "HUMAN_APPROVAL"
+        ],
+        "title": "GateName"
+      },
+      "GateReasonCode": {
+        "type": "string",
+        "enum": [
+          "PASSED",
+          "COMPLIANCE_REVIEW_FAILED",
+          "STOP_LOSS_NOT_REGISTERED",
+          "LIQUIDITY_FAILED",
+          "DELIVERED_PROFIT_MISSING",
+          "DELIVERED_PROFIT_NON_POSITIVE",
+          "DATA_QUALITY_FAILED",
+          "SAMPLE_SIZE_FAILED",
+          "OPERATIONAL_RECENCY_FAILED",
+          "HUMAN_APPROVAL_MISSING",
+          "HUMAN_APPROVAL_ASSESSMENT_MISMATCH"
+        ],
+        "title": "GateReasonCode"
+      },
+      "GateResult": {
+        "properties": {
+          "name": {
+            "$ref": "#/components/schemas/GateName"
+          },
+          "passed": {
+            "type": "boolean",
+            "title": "Passed"
+          },
+          "blocks_decision": {
+            "type": "boolean",
+            "title": "Blocks Decision"
+          },
+          "override_allowed": {
+            "type": "boolean",
+            "const": false,
+            "title": "Override Allowed",
+            "default": false
+          },
+          "reason_code": {
+            "$ref": "#/components/schemas/GateReasonCode"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": ".*\\S.*",
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "passed",
+          "blocks_decision",
+          "reason_code",
+          "reason"
+        ],
+        "title": "GateResult"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "HumanApproval": {
+        "properties": {
+          "approver_id": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": ".*\\S.*",
+            "title": "Approver Id"
+          },
+          "approved_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Approved At"
+          },
+          "assessment_id": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": ".*\\S.*",
+            "title": "Assessment Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "approver_id",
+          "approved_at",
+          "assessment_id"
+        ],
+        "title": "HumanApproval"
+      },
+      "MissingnessStatus": {
+        "type": "string",
+        "enum": [
+          "NOT_COLLECTED",
+          "PARTIAL",
+          "COMPLETE"
+        ],
+        "title": "MissingnessStatus"
+      },
+      "Provenance": {
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "pattern": "^\\d+\\.\\d+\\.\\d+$",
+            "title": "Schema Version"
+          },
+          "model_version": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": ".*\\S.*",
+            "title": "Model Version"
+          },
+          "engine_commit": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": ".*\\S.*",
+            "title": "Engine Commit"
+          },
+          "generated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Generated At"
+          },
+          "evidence_as_of": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Evidence As Of"
+          },
+          "market": {
+            "type": "string",
+            "const": "EG",
+            "title": "Market"
+          },
+          "source_ids": {
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": ".*\\S.*"
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Source Ids"
+          }
+        },
+        "type": "object",
+        "required": [
+          "schema_version",
+          "model_version",
+          "engine_commit",
+          "generated_at",
+          "evidence_as_of",
+          "market",
+          "source_ids"
+        ],
+        "title": "Provenance"
+      },
+      "ReviewStatus": {
+        "type": "string",
+        "enum": [
+          "PENDING",
+          "APPROVED",
+          "REJECTED"
+        ],
+        "title": "ReviewStatus"
+      },
+      "Uncertainty": {
+        "properties": {
+          "method": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": ".*\\S.*",
+            "title": "Method"
+          },
+          "lower": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lower"
+          },
+          "upper": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upper"
+          },
+          "notes": {
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": ".*\\S.*"
+            },
+            "type": "array",
+            "title": "Notes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "method"
+        ],
+        "title": "Uncertainty"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  }
+}

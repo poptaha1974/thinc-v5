@@ -82,6 +82,11 @@ class AssessmentRecord(IdMixin, TenantOwnedMixin, CreatedAtMixin, Base):
             "domain_assessment_id",
             name="uq_assessment_records_tenant_id_domain_assessment_id",
         ),
+        UniqueConstraint(
+            "tenant_id",
+            "idempotency_key",
+            name="uq_assessment_records_tenant_id_idempotency_key",
+        ),
         CheckConstraint(
             "btrim(domain_assessment_id) <> ''",
             name="domain_assessment_id_non_blank",
@@ -93,6 +98,7 @@ class AssessmentRecord(IdMixin, TenantOwnedMixin, CreatedAtMixin, Base):
         nullable=False,
         comment="Text assessment_id from the domain model",
     )
+    idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     assessment: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     assessment_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     provenance: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
@@ -129,6 +135,11 @@ class HumanApprovalRecord(IdMixin, TenantOwnedMixin, CreatedAtMixin, Base):
             name="fk_human_approval_records_assessment_tenant",
             ondelete="RESTRICT",
         ),
+        UniqueConstraint(
+            "tenant_id",
+            "idempotency_key",
+            name="uq_human_approval_records_tenant_id_idempotency_key",
+        ),
     )
 
     assessment_id: Mapped[uuid.UUID] = mapped_column(
@@ -137,6 +148,7 @@ class HumanApprovalRecord(IdMixin, TenantOwnedMixin, CreatedAtMixin, Base):
         index=True,
     )
     approver_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     approved_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
