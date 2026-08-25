@@ -218,8 +218,7 @@ def test_downgrade_conflict_aborts_and_preserves_quarantine(
             ).one()
             conflict = connection.execute(
                 text(
-                    "SELECT id, output_hash FROM engine_output_records "
-                    "WHERE id = :id"
+                    "SELECT id, output_hash FROM engine_output_records WHERE id = :id"
                 ),
                 {"id": conflicting_id},
             ).one()
@@ -231,9 +230,10 @@ def test_downgrade_conflict_aborts_and_preserves_quarantine(
         assert conflict.id == conflicting_id
         assert conflict.output_hash == "sha256:conflict"
     finally:
-        if "engine_output_quarantine" in inspect(
-            migrated_database.migration_engine
-        ).get_table_names():
+        if (
+            "engine_output_quarantine"
+            in inspect(migrated_database.migration_engine).get_table_names()
+        ):
             with migrated_database.migration_engine.begin() as connection:
                 connection.execute(
                     text("DELETE FROM engine_output_records WHERE id = :id"),

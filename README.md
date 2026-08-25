@@ -11,6 +11,8 @@ Synthetic-only startup
 
 - Project target runtime: Python 3.12.
 - Production authentication is not implemented.
+- Non-production warning: this startup path is synthetic-only and uses an
+  insecure header-based test identity when explicitly enabled.
 - Synthetic test data cannot establish scientific performance.
 - Live PostgreSQL verification has not been run locally for this release packet.
 
@@ -73,11 +75,15 @@ The research-preview docs test is:
 
 ### 6. Start the API
 
-This application factory requires an injected repository and a test identity
-provider. Production deployment wiring is intentionally absent.
+This startup path is fail-closed. It starts only when
+`THINC_ENABLE_INSECURE_TEST_IDENTITY=true` is set explicitly. It uses
+`HeaderTestIdentityProvider`, an insecure header-based test identity dependency
+for local synthetic development only. Production deployment wiring is
+intentionally absent.
 
 ```powershell
-.\.venv\Scripts\python.exe -c "from fastapi.testclient import TestClient; print('Use create_app(...) from thinc_v5.api.app with explicit repository and test identity injection.')"
+$env:THINC_ENABLE_INSECURE_TEST_IDENTITY = "true"
+.\.venv\Scripts\python.exe -m uvicorn thinc_v5.api.devserver:create_dev_app --factory --host 127.0.0.1 --port 8000
 ```
 
 Available paths in this Foundation release:
@@ -85,6 +91,9 @@ Available paths in this Foundation release:
 - `POST /v1/assessments`
 - `GET /v1/assessments/{assessment_id}`
 - `POST /v1/assessments/{assessment_id}/approvals`
+
+Approval records do not recompute or mutate stored economics outputs or stored
+gate results. There is no `SCALE` endpoint.
 
 ## Research Preview Guardrails
 

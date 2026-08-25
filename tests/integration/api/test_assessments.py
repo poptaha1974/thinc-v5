@@ -277,9 +277,7 @@ def test_postgresql_concurrent_idempotency_has_one_executor_and_no_orphans(
             text("INSERT INTO tenants (id, slug, name) VALUES (:id, :slug, :name)"),
             {"id": tenant_id, "slug": f"tenant-{tenant_id}", "name": "Tenant"},
         )
-    repository = ReservationObservingPostgresRepository(
-        migrated_database.app_engine
-    )
+    repository = ReservationObservingPostgresRepository(migrated_database.app_engine)
     engine_started = Event()
     release_engine = Event()
     execution_lock = Lock()
@@ -346,8 +344,7 @@ def test_postgresql_concurrent_idempotency_has_one_executor_and_no_orphans(
         set_tenant_context(connection, tenant_id)
         assessment_count = connection.execute(
             text(
-                "SELECT count(*) FROM assessment_records "
-                "WHERE idempotency_key = :key"
+                "SELECT count(*) FROM assessment_records WHERE idempotency_key = :key"
             ),
             {"key": "postgres-concurrent-key"},
         ).scalar_one()
@@ -431,12 +428,15 @@ def test_postgresql_expired_owner_is_fenced_after_takeover(
             "sha256:request",
             stale,
         )
-    assert repository.get_engine_output(
-        tenant_id,
-        winner.assessment_id,
-        winner,
-        "economics",
-    ) == winner_output
+    assert (
+        repository.get_engine_output(
+            tenant_id,
+            winner.assessment_id,
+            winner,
+            "economics",
+        )
+        == winner_output
+    )
 
 
 def test_postgresql_active_heartbeat_ignores_deliberately_skewed_callers(
@@ -466,9 +466,7 @@ def test_postgresql_active_heartbeat_ignores_deliberately_skewed_callers(
             text("INSERT INTO tenants (id, slug, name) VALUES (:id, :slug, :name)"),
             {"id": tenant_id, "slug": f"tenant-{tenant_id}", "name": "Tenant"},
         )
-    repository = ReservationObservingPostgresRepository(
-        migrated_database.app_engine
-    )
+    repository = ReservationObservingPostgresRepository(migrated_database.app_engine)
     request_hash = "sha256:skewed-request"
     provenance: dict[str, object] = {"source_ids": ["source-1"]}
     owner = repository.reserve_assessment(

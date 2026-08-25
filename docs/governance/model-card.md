@@ -50,7 +50,11 @@ available.
 
 Human approval is an explicit gate. `SCALE` is blocked unless all seven gates
 pass and approval references the exact assessment ID, approver ID, and
-timestamp. Production authentication is not implemented.
+timestamp. Approval records do not recompute stored economics outputs or stored
+gate results. Production authentication is not implemented, and there is no
+`SCALE` endpoint.
+
+Production authentication is not implemented.
 
 ## Validation Status
 

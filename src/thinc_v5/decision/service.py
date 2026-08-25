@@ -220,9 +220,7 @@ class InMemoryAssessmentRepository:
         self._by_id: dict[tuple[UUID, str], AssessmentResponse] = {}
         self._approvals: dict[tuple[UUID, str], StoredApproval] = {}
         self._approval_idempotency: dict[tuple[UUID, str], StoredApproval] = {}
-        self._engine_outputs: dict[
-            tuple[UUID, str, str], StoredEngineOutput
-        ] = {}
+        self._engine_outputs: dict[tuple[UUID, str, str], StoredEngineOutput] = {}
 
     @property
     def heartbeat_interval_seconds(self) -> float:
@@ -253,9 +251,7 @@ class InMemoryAssessmentRepository:
                         assessment_id=str(uuid4()),
                         owner_token=str(uuid4()),
                         fencing_epoch=1,
-                        lease_expires_at=(
-                            datetime.now(UTC) + self._reservation_lease
-                        ),
+                        lease_expires_at=(datetime.now(UTC) + self._reservation_lease),
                         request_hash=request_hash,
                         state="PENDING",
                     )
@@ -265,9 +261,8 @@ class InMemoryAssessmentRepository:
                     raise IdempotencyConflict
                 if stored.state == "COMPLETED":
                     return _memory_reservation(stored, execute=False)
-                if (
-                    stored.state == "FAILED"
-                    or stored.lease_expires_at <= datetime.now(UTC)
+                if stored.state == "FAILED" or stored.lease_expires_at <= datetime.now(
+                    UTC
                 ):
                     stored.state = "PENDING"
                     stored.owner_token = str(uuid4())
@@ -452,10 +447,9 @@ class SqlAlchemyAssessmentRepository:
                     select(
                         AssessmentRecord.domain_assessment_id,
                         AssessmentRecord.assessment,
-                        (
-                            AssessmentRecord.lease_expires_at
-                            > _database_clock()
-                        ).label("lease_active"),
+                        (AssessmentRecord.lease_expires_at > _database_clock()).label(
+                            "lease_active"
+                        ),
                     ).where(
                         AssessmentRecord.tenant_id == tenant_id,
                         AssessmentRecord.idempotency_key == idempotency_key,
@@ -500,9 +494,7 @@ class SqlAlchemyAssessmentRepository:
                         owner_token="",
                         fencing_epoch=int(payload.get("fencing_epoch", 0)),
                         execute=False,
-                        response=AssessmentResponse.model_validate(
-                            payload["response"]
-                        ),
+                        response=AssessmentResponse.model_validate(payload["response"]),
                     )
                 if payload["state"] == "FAILED" or row.lease_active is not True:
                     owner_token = str(uuid4())
@@ -566,9 +558,7 @@ class SqlAlchemyAssessmentRepository:
                     AssessmentRecord.idempotency_key == idempotency_key,
                 )
                 .values(
-                    lease_expires_at=_database_lease_expiry(
-                        self._reservation_lease
-                    )
+                    lease_expires_at=_database_lease_expiry(self._reservation_lease)
                 )
             )
 
@@ -1103,9 +1093,9 @@ def _load_reservation(
         select(
             AssessmentRecord.domain_assessment_id,
             AssessmentRecord.assessment,
-            (
-                AssessmentRecord.lease_expires_at > _database_clock()
-            ).label("lease_active"),
+            (AssessmentRecord.lease_expires_at > _database_clock()).label(
+                "lease_active"
+            ),
         ).where(
             AssessmentRecord.tenant_id == tenant_id,
             AssessmentRecord.idempotency_key == idempotency_key,
@@ -1246,18 +1236,15 @@ def _stored_approval(record: Row[Any]) -> StoredApproval:
 
 
 def _approval_select() -> Select[tuple[str, str, datetime, str]]:
-    return (
-        select(
-            HumanApprovalRecord.approval_hash,
-            HumanApprovalRecord.approver_id,
-            HumanApprovalRecord.approved_at,
-            AssessmentRecord.domain_assessment_id,
-        )
-        .join(
-            AssessmentRecord,
-            (AssessmentRecord.tenant_id == HumanApprovalRecord.tenant_id)
-            & (AssessmentRecord.id == HumanApprovalRecord.assessment_id),
-        )
+    return select(
+        HumanApprovalRecord.approval_hash,
+        HumanApprovalRecord.approver_id,
+        HumanApprovalRecord.approved_at,
+        AssessmentRecord.domain_assessment_id,
+    ).join(
+        AssessmentRecord,
+        (AssessmentRecord.tenant_id == HumanApprovalRecord.tenant_id)
+        & (AssessmentRecord.id == HumanApprovalRecord.assessment_id),
     )
 
 

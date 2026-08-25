@@ -50,9 +50,7 @@ def upgrade() -> None:
             "tenant_id",
             "assessment_id",
             "engine_name",
-            name=(
-                "uq_engine_output_records_tenant_id_assessment_id_engine_name"
-            ),
+            name=("uq_engine_output_records_tenant_id_assessment_id_engine_name"),
         ),
     )
     op.create_index(
@@ -72,9 +70,7 @@ def upgrade() -> None:
         "USING (tenant_id = current_setting('app.tenant_id', true)::uuid) "
         "WITH CHECK (tenant_id = current_setting('app.tenant_id', true)::uuid)"
     )
-    op.execute(
-        "REVOKE ALL PRIVILEGES ON engine_output_records FROM PUBLIC, thinc_app"
-    )
+    op.execute("REVOKE ALL PRIVILEGES ON engine_output_records FROM PUBLIC, thinc_app")
     op.execute(
         "GRANT SELECT, INSERT, UPDATE, DELETE ON engine_output_records TO thinc_app"
     )

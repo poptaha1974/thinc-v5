@@ -116,9 +116,7 @@ class EngineOutputRecord(IdMixin, TenantOwnedMixin, CreatedAtMixin, Base):
             "tenant_id",
             "assessment_id",
             "engine_name",
-            name=(
-                "uq_engine_output_records_tenant_id_assessment_id_engine_name"
-            ),
+            name=("uq_engine_output_records_tenant_id_assessment_id_engine_name"),
         ),
         ForeignKeyConstraint(
             ["tenant_id", "assessment_id"],

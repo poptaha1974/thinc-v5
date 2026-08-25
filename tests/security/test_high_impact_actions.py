@@ -45,13 +45,13 @@ def test_openapi_has_no_high_impact_action_paths() -> None:
 
     assert paths
     assert all(
-        forbidden not in path.lower()
-        for path in paths
-        for forbidden in forbidden_terms
+        forbidden not in path.lower() for path in paths for forbidden in forbidden_terms
     )
+    assert "/v1/scale" not in paths
+    assert "/v1/assessments/{assessment_id}/scale" not in paths
 
 
-def test_approval_is_bound_to_tenant_and_does_not_mutate_engine_output() -> None:
+def test_approval_is_bound_to_tenant_and_does_not_recompute_stored_results() -> None:
     client = build_client()
     created = client.post(
         "/v1/assessments",
@@ -60,6 +60,7 @@ def test_approval_is_bound_to_tenant_and_does_not_mutate_engine_output() -> None
     ).json()
     assessment_id = created["assessment_id"]
     economics_before = created["data"]["economics"]
+    gate_results_before = created["data"]["gate_results"]
 
     cross_tenant = client.post(
         f"/v1/assessments/{assessment_id}/approvals",
@@ -84,6 +85,7 @@ def test_approval_is_bound_to_tenant_and_does_not_mutate_engine_output() -> None
         "assessment_id": assessment_id,
     }
     assert fetched.json()["data"]["economics"] == economics_before
+    assert fetched.json()["data"]["gate_results"] == gate_results_before
 
 
 def test_approval_post_requires_idempotency_key() -> None:

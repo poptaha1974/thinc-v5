@@ -50,9 +50,7 @@ def test_openapi_declares_rfc_9457_problem_responses() -> None:
         responses = paths[path][method]["responses"]
         for status in statuses:
             assert set(responses[status]["content"]) == {"application/problem+json"}
-            schema = responses[status]["content"]["application/problem+json"][
-                "schema"
-            ]
+            schema = responses[status]["content"]["application/problem+json"]["schema"]
             assert schema["title"] == "ProblemDetails"
 
     assert "HTTPValidationError" not in app.openapi().get("components", {}).get(

@@ -534,14 +534,16 @@ def test_stale_owner_is_fenced_after_retry_takeover() -> None:
             request_hash,
             stale,
         )
-    sample_response = AssessmentService(
-        InMemoryAssessmentRepository()
-    ).create_assessment(
-        tenant_id=tenant_id,
-        actor_id="researcher-1",
-        idempotency_key="sample-response",
-        request=build_assessment_input(),
-    ).model_copy(update={"assessment_id": stale.assessment_id})
+    sample_response = (
+        AssessmentService(InMemoryAssessmentRepository())
+        .create_assessment(
+            tenant_id=tenant_id,
+            actor_id="researcher-1",
+            idempotency_key="sample-response",
+            request=build_assessment_input(),
+        )
+        .model_copy(update={"assessment_id": stale.assessment_id})
+    )
     with pytest.raises(ReservationStateError):
         repository.complete_assessment(
             tenant_id,
@@ -551,9 +553,12 @@ def test_stale_owner_is_fenced_after_retry_takeover() -> None:
             sample_response,
         )
 
-    assert repository.get_engine_output(
-        tenant_id,
-        winner.assessment_id,
-        winner,
-        "economics",
-    ) == output
+    assert (
+        repository.get_engine_output(
+            tenant_id,
+            winner.assessment_id,
+            winner,
+            "economics",
+        )
+        == output
+    )

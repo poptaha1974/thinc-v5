@@ -30,6 +30,9 @@ The exact seven gates are:
 These gates are independent. A failing gate cannot be compensated for by any
 aggregate score because no aggregate score exists in the API.
 
+Approvals record human sign-off only. They do not recompute stored economics
+outputs or stored gate results, and the API exposes no `SCALE` endpoint.
+
 ## Data Lineage Fields
 
 Every research preview result is expected to carry the following lineage and
@@ -58,16 +61,26 @@ review fields:
 
 ## Outcomes For Future Validation
 
-The next validation stages must predefine outcomes at:
+The next validation stages must predefine:
 
-- 30 days
-- 60 days
-- 90 days
-- 180 days
-- 365 days
+- Intermediate outcomes at 30 days: early operational recency, approval
+  latency, evidence completeness, and stop-loss triggers.
+- Primary delivered contribution outcomes at 60 days: delivered contribution
+  profit and profit per delivered order.
+- Intermediate outcomes at 90 days: persistence of delivered contribution,
+  operational stability, and evidence quality.
+- Primary delivered contribution outcomes at 180 days: delivered contribution
+  profit, profit per delivered order, and cash recovery behavior.
+- Follow-up outcomes at 365 days: persistence, retention, repeat purchase, and
+  medium-term operational durability.
 
-Those windows should track realized economics, operational recency, approval
-latency, and any stop-loss triggers under a preregistered plan.
+Secondary outcomes from the design spec remain:
+
+- disciplined continuation and growth
+- cash flow and capital payback period
+- repeat purchase and retention
+- direct demand, share of search, trust, and reviews
+- learning completeness, evidence quality, and execution quality
 
 ## Scientific Methodology For Later Releases
 
@@ -79,6 +92,8 @@ Before any validated release claim, the team must execute:
 - PR-AUC and ROC-AUC only when the target becomes a binary prediction task.
 - Decision-curve analysis only when downstream decision thresholds are
   explicitly specified.
+- Sensitivity analysis for weights, thresholds, and missing data handling.
+- Independent temporal validation before external validation.
 
 The Foundation release does not yet justify predictive or causal language.
 

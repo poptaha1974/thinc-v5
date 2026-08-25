@@ -20,8 +20,11 @@
 
 - OpenAPI paths are limited to assessment create, retrieval, and approval.
 - No endpoint executes ads, budgets, publishing, launch, or scale actions.
+- No `SCALE` endpoint exists.
 - Missing data remains explicit instead of being coerced to zero.
 - Human approval is required for `SCALE`.
+- Approval records do not recompute stored economics outputs or stored gate
+  results.
 
 ## Scientific Review Checklist
 
@@ -36,9 +39,13 @@
 
 ## Release Blockers
 
-- Python 3.12 CI verification pending.
-- Live PostgreSQL verification pending.
-- Production authentication implementation pending.
+- Python 3.12 full CI verification pending:
+  `ruff format --check .`, `ruff check .`, `mypy src`,
+  `pytest --cov=thinc_v5 --cov-fail-under=90`, `bandit -r src`,
+  and `pip-audit`.
+- Live PostgreSQL verification pending, including live PostgreSQL tests.
+- Refined credential scan must pass with no assigned literal secrets.
+- Production authentication is not implemented.
 - Temporal and external validation pending.
 - Subgroup risk review pending.
 
