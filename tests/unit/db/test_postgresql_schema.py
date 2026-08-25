@@ -4,6 +4,7 @@ from typing import cast
 
 from sqlalchemy import (
     CheckConstraint,
+    DateTime,
     ForeignKeyConstraint,
     String,
     Table,
@@ -96,6 +97,14 @@ def test_api_post_idempotency_keys_are_unique_within_each_tenant() -> None:
             column.name
             for column in _unique(table, "tenant_id", "idempotency_key").columns
         } == {"tenant_id", "idempotency_key"}
+
+
+def test_assessment_reservation_lease_is_a_database_timestamptz() -> None:
+    lease = AssessmentRecord.__table__.c.lease_expires_at
+
+    assert isinstance(lease.type, DateTime)
+    assert lease.type.timezone is True
+    assert lease.nullable is True
 
 
 def test_engine_outputs_are_independent_tenant_owned_records() -> None:

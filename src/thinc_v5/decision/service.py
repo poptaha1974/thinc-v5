@@ -12,7 +12,7 @@ from typing import Any, Literal, Protocol, cast
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel
-from sqlalchemy import insert, select, text, update
+from sqlalchemy import DateTime, func, insert, select, text, update
 from sqlalchemy.engine import Connection, Engine, Row
 from sqlalchemy.sql import Select
 
@@ -452,6 +452,10 @@ class SqlAlchemyAssessmentRepository:
                     select(
                         AssessmentRecord.domain_assessment_id,
                         AssessmentRecord.assessment,
+                        (
+                            AssessmentRecord.lease_expires_at
+                            > _database_clock()
+                        ).label("lease_active"),
                     ).where(
                         AssessmentRecord.tenant_id == tenant_id,
                         AssessmentRecord.idempotency_key == idempotency_key,
@@ -464,7 +468,6 @@ class SqlAlchemyAssessmentRepository:
                         request_hash,
                         owner_token,
                         1,
-                        self._reservation_lease,
                     )
                     connection.execute(
                         insert(AssessmentRecord).values(
@@ -475,6 +478,9 @@ class SqlAlchemyAssessmentRepository:
                             assessment=payload,
                             assessment_hash=request_hash,
                             provenance=provenance,
+                            lease_expires_at=_database_lease_expiry(
+                                self._reservation_lease
+                            ),
                         )
                     )
                     return AssessmentReservation(
@@ -498,7 +504,7 @@ class SqlAlchemyAssessmentRepository:
                             payload["response"]
                         ),
                     )
-                if payload["state"] == "FAILED" or _lease_expired(payload):
+                if payload["state"] == "FAILED" or row.lease_active is not True:
                     owner_token = str(uuid4())
                     fencing_epoch = int(payload.get("fencing_epoch", 0)) + 1
                     connection.execute(
@@ -512,10 +518,12 @@ class SqlAlchemyAssessmentRepository:
                                 request_hash,
                                 owner_token,
                                 fencing_epoch,
-                                self._reservation_lease,
                             ),
                             assessment_hash=request_hash,
                             provenance=provenance,
+                            lease_expires_at=_database_lease_expiry(
+                                self._reservation_lease
+                            ),
                         )
                     )
                     return AssessmentReservation(
@@ -539,7 +547,7 @@ class SqlAlchemyAssessmentRepository:
         with self._engine.begin() as connection:
             set_tenant_context(connection, tenant_id)
             _lock_idempotency_key(connection, tenant_id, idempotency_key)
-            assessment_id, payload = _load_reservation(
+            assessment_id, payload, lease_active = _load_reservation(
                 connection,
                 tenant_id,
                 idempotency_key,
@@ -547,20 +555,21 @@ class SqlAlchemyAssessmentRepository:
             _require_database_reservation_owner(
                 assessment_id,
                 payload,
+                lease_active,
                 request_hash,
                 reservation,
             )
-            renewed = dict(payload)
-            renewed["lease_expires_at"] = (
-                datetime.now(UTC) + self._reservation_lease
-            ).isoformat()
             connection.execute(
                 update(AssessmentRecord)
                 .where(
                     AssessmentRecord.tenant_id == tenant_id,
                     AssessmentRecord.idempotency_key == idempotency_key,
                 )
-                .values(assessment=renewed)
+                .values(
+                    lease_expires_at=_database_lease_expiry(
+                        self._reservation_lease
+                    )
+                )
             )
 
     def complete_assessment(
@@ -574,7 +583,7 @@ class SqlAlchemyAssessmentRepository:
         with self._engine.begin() as connection:
             set_tenant_context(connection, tenant_id)
             _lock_idempotency_key(connection, tenant_id, idempotency_key)
-            assessment_id, payload = _load_reservation(
+            assessment_id, payload, lease_active = _load_reservation(
                 connection,
                 tenant_id,
                 idempotency_key,
@@ -582,6 +591,7 @@ class SqlAlchemyAssessmentRepository:
             _require_database_reservation_owner(
                 assessment_id,
                 payload,
+                lease_active,
                 request_hash,
                 reservation,
             )
@@ -601,6 +611,7 @@ class SqlAlchemyAssessmentRepository:
                     },
                     assessment_hash=_json_hash(response_payload),
                     provenance=response.provenance.model_dump(mode="json"),
+                    lease_expires_at=None,
                 )
             )
 
@@ -614,7 +625,7 @@ class SqlAlchemyAssessmentRepository:
         with self._engine.begin() as connection:
             set_tenant_context(connection, tenant_id)
             _lock_idempotency_key(connection, tenant_id, idempotency_key)
-            assessment_id, payload = _load_reservation(
+            assessment_id, payload, lease_active = _load_reservation(
                 connection,
                 tenant_id,
                 idempotency_key,
@@ -622,6 +633,7 @@ class SqlAlchemyAssessmentRepository:
             _require_database_reservation_owner(
                 assessment_id,
                 payload,
+                lease_active,
                 request_hash,
                 reservation,
             )
@@ -641,6 +653,7 @@ class SqlAlchemyAssessmentRepository:
                         ),
                     },
                     assessment_hash=request_hash,
+                    lease_expires_at=None,
                 )
             )
 
@@ -1061,34 +1074,38 @@ def _pending_payload(
     request_hash: str,
     owner_token: str,
     fencing_epoch: int,
-    lease: timedelta,
 ) -> dict[str, object]:
     return {
         "state": "PENDING",
         "request_hash": request_hash,
         "owner_token": owner_token,
         "fencing_epoch": fencing_epoch,
-        "lease_expires_at": (datetime.now(UTC) + lease).isoformat(),
         "retry_semantics": (
             "a failed or expired owner is retried with the same assessment_id"
         ),
     }
 
 
-def _lease_expired(payload: dict[str, Any]) -> bool:
-    lease_expires_at = datetime.fromisoformat(str(payload["lease_expires_at"]))
-    return lease_expires_at <= datetime.now(UTC)
+def _database_clock() -> Any:
+    return func.clock_timestamp(type_=DateTime(timezone=True))
+
+
+def _database_lease_expiry(lease: timedelta) -> Any:
+    return _database_clock() + lease
 
 
 def _load_reservation(
     connection: Connection,
     tenant_id: UUID,
     idempotency_key: str,
-) -> tuple[str, dict[str, Any]]:
+) -> tuple[str, dict[str, Any], bool]:
     row = connection.execute(
         select(
             AssessmentRecord.domain_assessment_id,
             AssessmentRecord.assessment,
+            (
+                AssessmentRecord.lease_expires_at > _database_clock()
+            ).label("lease_active"),
         ).where(
             AssessmentRecord.tenant_id == tenant_id,
             AssessmentRecord.idempotency_key == idempotency_key,
@@ -1096,12 +1113,17 @@ def _load_reservation(
     ).one_or_none()
     if row is None:
         raise ReservationStateError("assessment reservation is missing")
-    return row.domain_assessment_id, cast(dict[str, Any], row.assessment)
+    return (
+        row.domain_assessment_id,
+        cast(dict[str, Any], row.assessment),
+        row.lease_active is True,
+    )
 
 
 def _require_database_reservation_owner(
     assessment_id: str,
     payload: dict[str, Any],
+    lease_active: bool,
     request_hash: str,
     reservation: AssessmentReservation,
 ) -> None:
@@ -1112,7 +1134,7 @@ def _require_database_reservation_owner(
         or assessment_id != reservation.assessment_id
         or payload["owner_token"] != reservation.owner_token
         or int(payload.get("fencing_epoch", 0)) != reservation.fencing_epoch
-        or _lease_expired(payload)
+        or not lease_active
     ):
         raise ReservationStateError("assessment reservation ownership was lost")
 
@@ -1151,7 +1173,7 @@ def _lock_and_require_output_owner(
     if idempotency_key is None:
         raise ReservationStateError("assessment reservation is missing")
     _lock_idempotency_key(connection, tenant_id, idempotency_key)
-    loaded_assessment_id, payload = _load_reservation(
+    loaded_assessment_id, payload, lease_active = _load_reservation(
         connection,
         tenant_id,
         idempotency_key,
@@ -1159,6 +1181,7 @@ def _lock_and_require_output_owner(
     _require_database_reservation_owner(
         loaded_assessment_id,
         payload,
+        lease_active,
         str(payload.get("request_hash", "")),
         reservation,
     )

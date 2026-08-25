@@ -119,3 +119,40 @@ FastAPI emitted an upstream `asyncio.iscoroutinefunction` deprecation warning on
   skipped because live database URLs were not supplied; they are not counted
   as successful live PostgreSQL verification.
 - Ruff and mypy across 20 source files: clean.
+
+## Fix round 4/5
+
+- PostgreSQL reservation leases now live in the dedicated nullable
+  `assessment_records.lease_expires_at` `TIMESTAMPTZ` column. Reservation
+  creation, takeover, and heartbeat renewal calculate deadlines with
+  PostgreSQL `clock_timestamp()`, and ownership/takeover comparisons are SQL
+  comparisons against that same database clock after the tenant/idempotency
+  advisory lock is held. The PostgreSQL repository no longer stores or parses
+  a worker-clock lease timestamp in the JSON payload.
+- Added SQL-emission tests that reject any PostgreSQL lease path which reads
+  the caller's `datetime.now`, assert the advisory lock precedes the database
+  clock comparison, and assert creation and renewal emit `clock_timestamp()`.
+- Added a live PostgreSQL concurrency fixture with a heartbeat caller skewed
+  one year backward and a follower skewed one year forward. It holds execution
+  across multiple lease periods and proves that the active database heartbeat
+  prevents takeover when the live database prerequisites are available.
+- Migration `0004` downgrade no longer uses `ON CONFLICT DO NOTHING`. It locks
+  the source, quarantine, and assessment tables; aborts before restore on any
+  primary-key or tenant/assessment/engine conflict; performs a plain restore;
+  removes only rows whose complete persisted representation matches exactly;
+  aborts if any quarantine row remains unresolved; and drops the quarantine
+  table only after that empty check succeeds transactionally.
+- Added offline downgrade ordering/guard assertions and a live conflict
+  fixture that expects downgrade to abort while preserving both the original
+  quarantine record and the conflicting live output.
+- The four focused regression tests were observed failing for the intended
+  pre-fix reasons and then passing after the implementation.
+- Focused decision/schema/migration/API suite: `24 passed, 9 skipped`.
+- Full regression: `100 passed, 23 skipped`.
+- Full offline upgrade and `head:base` downgrade SQL generation passed,
+  including the lease clock and fail-closed quarantine guards.
+- Ruff: clean. Mypy: clean across 20 source files.
+- The skewed-clock heartbeat test and downgrade-conflict fixture skipped
+  because `THINC_TEST_DATABASE_URL` and `THINC_TEST_APP_DATABASE_URL` were not
+  supplied. They are explicitly not counted as successful live PostgreSQL
+  verification.

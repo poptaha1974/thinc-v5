@@ -21,6 +21,20 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    op.add_column(
+        "assessment_records",
+        sa.Column(
+            "lease_expires_at",
+            sa.DateTime(timezone=True),
+            nullable=True,
+        ),
+    )
+    op.execute(
+        "UPDATE assessment_records "
+        "SET lease_expires_at = clock_timestamp() + INTERVAL '5 minutes', "
+        "assessment = assessment - 'lease_expires_at' "
+        "WHERE assessment ->> 'state' = 'PENDING'"
+    )
     op.create_table(
         "engine_output_quarantine",
         sa.Column(
@@ -91,14 +105,57 @@ def downgrade() -> None:
         type_="foreignkey",
     )
     op.execute("LOCK TABLE engine_output_records IN ACCESS EXCLUSIVE MODE")
+    op.execute("LOCK TABLE engine_output_quarantine IN ACCESS EXCLUSIVE MODE")
+    op.execute("LOCK TABLE assessment_records IN ACCESS EXCLUSIVE MODE")
     op.execute("ALTER TABLE engine_output_records NO FORCE ROW LEVEL SECURITY")
+    op.execute(
+        "DO $$ BEGIN "
+        "IF EXISTS ("
+        "SELECT 1 FROM engine_output_quarantine AS quarantine "
+        "JOIN engine_output_records AS output_record "
+        "ON output_record.id = quarantine.source_output_id "
+        "OR (output_record.tenant_id = quarantine.tenant_id "
+        "AND output_record.assessment_id = quarantine.assessment_id "
+        "AND output_record.engine_name = quarantine.engine_name)"
+        ") THEN "
+        "RAISE EXCEPTION 'engine output quarantine restore conflict'; "
+        "END IF; END $$"
+    )
     op.execute(
         "INSERT INTO engine_output_records "
         "(id, tenant_id, assessment_id, engine_name, output, output_hash, "
         "provenance, created_at) "
         "SELECT source_output_id, tenant_id, assessment_id, engine_name, output, "
         "output_hash, provenance, original_created_at "
-        "FROM engine_output_quarantine ON CONFLICT DO NOTHING"
+        "FROM engine_output_quarantine"
+    )
+    op.execute(
+        "DELETE FROM engine_output_quarantine AS quarantine "
+        "USING engine_output_records AS output_record "
+        "WHERE output_record.id IS NOT DISTINCT FROM quarantine.source_output_id "
+        "AND output_record.tenant_id IS NOT DISTINCT FROM quarantine.tenant_id "
+        "AND output_record.assessment_id "
+        "IS NOT DISTINCT FROM quarantine.assessment_id "
+        "AND output_record.engine_name IS NOT DISTINCT FROM quarantine.engine_name "
+        "AND output_record.output IS NOT DISTINCT FROM quarantine.output "
+        "AND output_record.output_hash IS NOT DISTINCT FROM quarantine.output_hash "
+        "AND output_record.provenance IS NOT DISTINCT FROM quarantine.provenance "
+        "AND output_record.created_at "
+        "IS NOT DISTINCT FROM quarantine.original_created_at"
+    )
+    op.execute(
+        "DO $$ BEGIN "
+        "IF EXISTS (SELECT 1 FROM engine_output_quarantine) THEN "
+        "RAISE EXCEPTION 'unresolved engine output quarantine'; "
+        "END IF; END $$"
     )
     op.execute("ALTER TABLE engine_output_records FORCE ROW LEVEL SECURITY")
     op.drop_table("engine_output_quarantine")
+    op.execute(
+        "UPDATE assessment_records "
+        "SET assessment = jsonb_set("
+        "assessment, '{lease_expires_at}', to_jsonb(lease_expires_at)"
+        ") WHERE assessment ->> 'state' = 'PENDING' "
+        "AND lease_expires_at IS NOT NULL"
+    )
+    op.drop_column("assessment_records", "lease_expires_at")

@@ -6,11 +6,15 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from threading import Event, Lock
+from types import SimpleNamespace
+from typing import Any
 from uuid import UUID
 
 import pytest
 from pydantic import BaseModel
+from sqlalchemy.dialects import postgresql
 
+import thinc_v5.decision.service as service_module
 from thinc_v5.decision.service import (
     AssessmentInput,
     AssessmentReservation,
@@ -31,10 +35,22 @@ class EmptyResult:
     def scalar_one_or_none(self) -> None:
         return None
 
+    def one_or_none(self) -> object | None:
+        return None
+
+
+class RowResult(EmptyResult):
+    def __init__(self, row: object) -> None:
+        self._row = row
+
+    def one_or_none(self) -> object:
+        return self._row
+
 
 class RecordingConnection:
-    def __init__(self) -> None:
+    def __init__(self, reservation_row: object | None = None) -> None:
         self.calls: list[tuple[object, object | None]] = []
+        self._reservation_row = reservation_row
 
     def in_transaction(self) -> bool:
         return True
@@ -45,12 +61,14 @@ class RecordingConnection:
         parameters: object | None = None,
     ) -> EmptyResult:
         self.calls.append((statement, parameters))
+        if getattr(statement, "is_select", False) and self._reservation_row:
+            return RowResult(self._reservation_row)
         return EmptyResult()
 
 
 class RecordingEngine:
-    def __init__(self) -> None:
-        self.connection = RecordingConnection()
+    def __init__(self, reservation_row: object | None = None) -> None:
+        self.connection = RecordingConnection(reservation_row)
 
     @contextmanager
     def begin(self):
@@ -146,6 +164,10 @@ def economics_registration() -> EngineRegistration:
     )
 
 
+def _postgresql_sql(statement: Any) -> str:
+    return str(statement.compile(dialect=postgresql.dialect()))
+
+
 def test_sql_repository_sets_transaction_local_tenant_context_before_read() -> None:
     engine = RecordingEngine()
     repository = SqlAlchemyAssessmentRepository(engine)  # type: ignore[arg-type]
@@ -161,6 +183,112 @@ def test_sql_repository_sets_transaction_local_tenant_context_before_read() -> N
     assert context_parameters == {"tenant_id": str(tenant_id)}
     assert "assessment_records" in str(select_statement)
     assert select_parameters is None
+
+
+def test_postgresql_reservation_sql_uses_database_clock_after_advisory_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ForbiddenCallerClock:
+        @classmethod
+        def now(cls, timezone: object = None) -> datetime:
+            del cls, timezone
+            raise AssertionError("PostgreSQL leases must not read the caller clock")
+
+    monkeypatch.setattr(service_module, "datetime", ForbiddenCallerClock)
+    engine = RecordingEngine()
+    repository = SqlAlchemyAssessmentRepository(engine)  # type: ignore[arg-type]
+    tenant_id = UUID("11111111-1111-4111-8111-111111111111")
+
+    repository.reserve_assessment(
+        tenant_id,
+        "database-clock-create",
+        "sha256:request",
+        {"source_ids": ["source-1"]},
+    )
+
+    statements = [call[0] for call in engine.connection.calls]
+    advisory_index = next(
+        index
+        for index, statement in enumerate(statements)
+        if "pg_advisory_xact_lock" in str(statement)
+    )
+    reservation_select_index = next(
+        index
+        for index, statement in enumerate(statements)
+        if getattr(statement, "is_select", False)
+    )
+    insert_statement = next(
+        statement for statement in statements if getattr(statement, "is_insert", False)
+    )
+    select_sql = _postgresql_sql(statements[reservation_select_index])
+    insert_sql = _postgresql_sql(insert_statement)
+
+    assert advisory_index < reservation_select_index
+    assert "lease_expires_at > clock_timestamp()" in select_sql
+    assert "lease_expires_at" in insert_sql
+    assert "clock_timestamp()" in insert_sql
+    assert "lease_expires_at" not in insert_statement.compile().params["assessment"]
+
+
+def test_postgresql_heartbeat_renews_lease_with_database_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ForbiddenCallerClock:
+        @classmethod
+        def now(cls, timezone: object = None) -> datetime:
+            del cls, timezone
+            raise AssertionError("PostgreSQL leases must not read the caller clock")
+
+    monkeypatch.setattr(service_module, "datetime", ForbiddenCallerClock)
+    assessment_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    request_hash = "sha256:request"
+    reservation = AssessmentReservation(
+        assessment_id=assessment_id,
+        owner_token="owner-token",
+        fencing_epoch=3,
+        execute=True,
+    )
+    engine = RecordingEngine(
+        SimpleNamespace(
+            domain_assessment_id=assessment_id,
+            assessment={
+                "state": "PENDING",
+                "request_hash": request_hash,
+                "owner_token": reservation.owner_token,
+                "fencing_epoch": reservation.fencing_epoch,
+            },
+            lease_active=True,
+        )
+    )
+    repository = SqlAlchemyAssessmentRepository(engine)  # type: ignore[arg-type]
+
+    repository.renew_assessment(
+        UUID("11111111-1111-4111-8111-111111111111"),
+        "database-clock-renew",
+        request_hash,
+        reservation,
+    )
+
+    statements = [call[0] for call in engine.connection.calls]
+    advisory_index = next(
+        index
+        for index, statement in enumerate(statements)
+        if "pg_advisory_xact_lock" in str(statement)
+    )
+    reservation_select_index = next(
+        index
+        for index, statement in enumerate(statements)
+        if getattr(statement, "is_select", False)
+    )
+    update_statement = next(
+        statement for statement in statements if getattr(statement, "is_update", False)
+    )
+    update_sql = _postgresql_sql(update_statement)
+
+    assert advisory_index < reservation_select_index
+    assert "lease_expires_at" in update_sql
+    assert "clock_timestamp()" in update_sql
+    assert "assessment=" not in update_sql
 
 
 def test_service_runs_and_persists_every_registered_engine_before_gates() -> None:

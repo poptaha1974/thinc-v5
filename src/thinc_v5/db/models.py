@@ -100,6 +100,10 @@ class AssessmentRecord(IdMixin, TenantOwnedMixin, CreatedAtMixin, Base):
         comment="Text assessment_id from the domain model",
     )
     idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     assessment: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     assessment_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     provenance: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)

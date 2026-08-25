@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
-from threading import Event, Lock
+from datetime import datetime, timedelta
+from threading import Event, Lock, Thread, current_thread
 from typing import Annotated
 from uuid import UUID, uuid4
 
@@ -12,6 +12,7 @@ from fastapi import Header
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
+import thinc_v5.decision.service as service_module
 from tests.integration.db.conftest import MigratedDatabase
 from thinc_v5.api.app import create_app
 from thinc_v5.db.session import set_tenant_context
@@ -436,3 +437,100 @@ def test_postgresql_expired_owner_is_fenced_after_takeover(
         winner,
         "economics",
     ) == winner_output
+
+
+def test_postgresql_active_heartbeat_ignores_deliberately_skewed_callers(
+    migrated_database: MigratedDatabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_datetime = datetime
+
+    class ThreadSkewedDateTime:
+        @classmethod
+        def now(cls, timezone: object = None) -> datetime:
+            current = real_datetime.now(timezone)  # type: ignore[arg-type]
+            if current_thread().name == "slow-caller-heartbeat":
+                return current - timedelta(days=365)
+            if current_thread().name.startswith("fast-caller-follower"):
+                return current + timedelta(days=365)
+            return current
+
+        @classmethod
+        def fromisoformat(cls, value: str) -> datetime:
+            return real_datetime.fromisoformat(value)
+
+    monkeypatch.setattr(service_module, "datetime", ThreadSkewedDateTime)
+    tenant_id = uuid4()
+    with migrated_database.migration_engine.begin() as connection:
+        connection.execute(
+            text("INSERT INTO tenants (id, slug, name) VALUES (:id, :slug, :name)"),
+            {"id": tenant_id, "slug": f"tenant-{tenant_id}", "name": "Tenant"},
+        )
+    repository = ReservationObservingPostgresRepository(
+        migrated_database.app_engine
+    )
+    request_hash = "sha256:skewed-request"
+    provenance: dict[str, object] = {"source_ids": ["source-1"]}
+    owner = repository.reserve_assessment(
+        tenant_id,
+        "postgres-skewed-clock-key",
+        request_hash,
+        provenance,
+    )
+    stop_heartbeat = Event()
+    heartbeat_renewed = Event()
+    heartbeat_errors: list[BaseException] = []
+
+    def heartbeat() -> None:
+        while not stop_heartbeat.wait(0.04):
+            try:
+                repository.renew_assessment(
+                    tenant_id,
+                    "postgres-skewed-clock-key",
+                    request_hash,
+                    owner,
+                )
+                heartbeat_renewed.set()
+            except BaseException as error:
+                heartbeat_errors.append(error)
+                return
+
+    heartbeat_thread = Thread(
+        target=heartbeat,
+        name="slow-caller-heartbeat",
+        daemon=True,
+    )
+    heartbeat_thread.start()
+    assert heartbeat_renewed.wait(timeout=5)
+
+    with ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="fast-caller-follower",
+    ) as executor:
+        follower = executor.submit(
+            repository.reserve_assessment,
+            tenant_id,
+            "postgres-skewed-clock-key",
+            request_hash,
+            provenance,
+        )
+        try:
+            assert repository.follower_waiting.wait(timeout=5)
+            time.sleep(0.7)
+            assert not follower.done()
+            assert heartbeat_errors == []
+        finally:
+            stop_heartbeat.set()
+            heartbeat_thread.join(timeout=5)
+            if follower.done():
+                live_owner = follower.result(timeout=5)
+            else:
+                live_owner = owner
+            repository.fail_assessment(
+                tenant_id,
+                "postgres-skewed-clock-key",
+                request_hash,
+                live_owner,
+            )
+            if not follower.done():
+                follower.result(timeout=5)

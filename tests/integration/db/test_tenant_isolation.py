@@ -60,6 +60,28 @@ def test_offline_migration_quarantines_orphan_engine_outputs_before_fk() -> None
     assert "quarantined_at" in sql
 
 
+def test_offline_downgrade_fails_closed_before_dropping_quarantine() -> None:
+    output = io.StringIO()
+    config = Config(str(PROJECT_ROOT / "alembic.ini"), output_buffer=output)
+    config.set_main_option("script_location", str(PROJECT_ROOT / "alembic"))
+    config.set_main_option("sqlalchemy.url", "postgresql+psycopg://offline")
+
+    command.downgrade(
+        config,
+        "0004_engine_output_assessment_fk:0003_engine_output_records",
+        sql=True,
+    )
+
+    sql = output.getvalue()
+    conflict_guard_at = sql.index("quarantine restore conflict")
+    restore_at = sql.index("INSERT INTO engine_output_records")
+    unresolved_guard_at = sql.index("unresolved engine output quarantine")
+    drop_at = sql.index("DROP TABLE engine_output_quarantine")
+    assert "ON CONFLICT DO NOTHING" not in sql
+    assert conflict_guard_at < restore_at < unresolved_guard_at < drop_at
+    assert "IS NOT DISTINCT FROM" in sql[restore_at:unresolved_guard_at]
+
+
 def test_upgrade_from_0003_quarantines_existing_orphan_engine_output(
     database_url: str,
     migrated_database: MigratedDatabase,
@@ -119,6 +141,108 @@ def test_upgrade_from_0003_quarantines_existing_orphan_engine_output(
         "orphaned before tenant-aware assessment foreign key"
     )
     assert quarantined.quarantined_at is not None
+
+
+def test_downgrade_conflict_aborts_and_preserves_quarantine(
+    database_url: str,
+    migrated_database: MigratedDatabase,
+) -> None:
+    config = alembic_config(database_url)
+    command.downgrade(config, "0003_engine_output_records")
+    tenant_id = uuid.uuid4()
+    quarantined_id = uuid.uuid4()
+    conflicting_id = uuid.uuid4()
+    assessment_record_id = uuid.uuid4()
+    with migrated_database.migration_engine.begin() as connection:
+        connection.execute(
+            text("INSERT INTO tenants (id, slug, name) VALUES (:id, :slug, :name)"),
+            {"id": tenant_id, "slug": f"tenant-{tenant_id}", "name": "Tenant"},
+        )
+        set_tenant_context(connection, tenant_id)
+        connection.execute(
+            text(
+                "INSERT INTO engine_output_records "
+                "(id, tenant_id, assessment_id, engine_name, output, "
+                "output_hash, provenance) VALUES "
+                "(:id, :tenant_id, 'missing-assessment', 'economics', "
+                "CAST(:output AS jsonb), 'sha256:quarantined', "
+                "CAST(:provenance AS jsonb))"
+            ),
+            {
+                "id": quarantined_id,
+                "tenant_id": tenant_id,
+                "output": '{"value": "quarantined"}',
+                "provenance": '{"source_ids": ["legacy-source"]}',
+            },
+        )
+
+    command.upgrade(config, "head")
+    with migrated_database.migration_engine.begin() as connection:
+        _insert_assessment(
+            connection,
+            tenant_id,
+            assessment_record_id,
+            "missing-assessment",
+        )
+        connection.execute(
+            text(
+                "INSERT INTO engine_output_records "
+                "(id, tenant_id, assessment_id, engine_name, output, "
+                "output_hash, provenance) VALUES "
+                "(:id, :tenant_id, 'missing-assessment', 'economics', "
+                "CAST(:output AS jsonb), 'sha256:conflict', "
+                "CAST(:provenance AS jsonb))"
+            ),
+            {
+                "id": conflicting_id,
+                "tenant_id": tenant_id,
+                "output": '{"value": "conflict"}',
+                "provenance": '{"source_ids": ["new-source"]}',
+            },
+        )
+
+    try:
+        with pytest.raises(exc.DBAPIError, match="quarantine restore conflict"):
+            command.downgrade(config, "0003_engine_output_records")
+
+        with migrated_database.migration_engine.connect() as connection:
+            revision = connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one()
+            quarantined = connection.execute(
+                text(
+                    "SELECT source_output_id, output, output_hash "
+                    "FROM engine_output_quarantine WHERE source_output_id = :id"
+                ),
+                {"id": quarantined_id},
+            ).one()
+            conflict = connection.execute(
+                text(
+                    "SELECT id, output_hash FROM engine_output_records "
+                    "WHERE id = :id"
+                ),
+                {"id": conflicting_id},
+            ).one()
+
+        assert revision == "0004_engine_output_assessment_fk"
+        assert quarantined.source_output_id == quarantined_id
+        assert quarantined.output == {"value": "quarantined"}
+        assert quarantined.output_hash == "sha256:quarantined"
+        assert conflict.id == conflicting_id
+        assert conflict.output_hash == "sha256:conflict"
+    finally:
+        if "engine_output_quarantine" in inspect(
+            migrated_database.migration_engine
+        ).get_table_names():
+            with migrated_database.migration_engine.begin() as connection:
+                connection.execute(
+                    text("DELETE FROM engine_output_records WHERE id = :id"),
+                    {"id": conflicting_id},
+                )
+                connection.execute(
+                    text("DELETE FROM assessment_records WHERE id = :id"),
+                    {"id": assessment_record_id},
+                )
 
 
 def test_upgrade_downgrade_reupgrade_recreates_identical_schema(
