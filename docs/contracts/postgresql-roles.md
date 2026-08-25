@@ -10,6 +10,11 @@ authenticate as a role distinct from `thinc_app`. It owns the THINC tables and
 functions and must be able to create and drop them. The migration does not
 create cluster roles.
 
+Alembic accepts exactly one effective URL. A URL explicitly placed in its
+`Config` object cannot be replaced by environment variables. Without an
+explicit URL, setting conflicting migration and test URLs is an error rather
+than an implicit precedence rule.
+
 ## Application identity
 
 `THINC_DATABASE_URL` (or `THINC_TEST_APP_DATABASE_URL` in tests) must
@@ -44,4 +49,15 @@ the tenant value is cleared before a pooled connection can serve another
 transaction.
 
 Destructive migration tests additionally require both test URLs, a database
-name containing `test`, and `THINC_TEST_DATABASE_DISPOSABLE=1`.
+name containing `test`, and `THINC_TEST_DATABASE_DISPOSABLE=1`. Role rejection
+tests additionally require a cluster-administrator connection through
+`THINC_TEST_PROVISIONER_DATABASE_URL`; that identity is never used by runtime
+or ordinary migration tests.
+
+The migration-cycle snapshot deliberately covers only THINC-owned database
+objects: the six THINC tables, their constraints/defaults/indexes/ownership,
+RLS policies, the audit trigger and function, direct table grants, the direct
+`thinc_app` schema ACL, and the audit function ACL. It excludes unrelated
+cluster roles, databases, schemas, extensions, and objects owned by other
+applications so a disposable shared PostgreSQL cluster is not treated as part
+of THINC's migration surface.

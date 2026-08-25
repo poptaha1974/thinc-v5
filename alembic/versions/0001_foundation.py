@@ -149,7 +149,7 @@ def upgrade() -> None:
         _created_at_column(),
         sa.CheckConstraint(
             "btrim(domain_assessment_id) <> ''",
-            name="ck_assessment_records_domain_assessment_id_non_blank",
+            name="domain_assessment_id_non_blank",
         ),
         sa.UniqueConstraint(
             "tenant_id",
@@ -274,6 +274,10 @@ def upgrade() -> None:
         BEFORE UPDATE OR DELETE ON audit_events
         FOR EACH ROW EXECUTE FUNCTION public.reject_audit_event_mutation()
         """
+    )
+    op.execute(
+        "REVOKE ALL PRIVILEGES ON FUNCTION "
+        "public.reject_audit_event_mutation() FROM PUBLIC, thinc_app"
     )
     op.execute("GRANT USAGE ON SCHEMA public TO thinc_app")
     op.execute("REVOKE ALL PRIVILEGES ON tenants FROM PUBLIC, thinc_app")

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config, pool
@@ -8,16 +7,13 @@ from sqlalchemy import engine_from_config, pool
 from alembic import context
 from thinc_v5.db import models as models
 from thinc_v5.db.base import metadata
+from thinc_v5.db.migration_config import configure_alembic_url
 
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-database_url = os.getenv("THINC_MIGRATION_DATABASE_URL") or os.getenv(
-    "THINC_TEST_DATABASE_URL"
-)
-if database_url:
-    config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
+configure_alembic_url(config)
 
 target_metadata = metadata
 

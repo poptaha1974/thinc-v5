@@ -26,6 +26,10 @@ def test_offline_migration_enforces_append_only_audit_events() -> None:
     assert "ERRCODE = '42501'" in sql
     assert "CREATE FUNCTION public.reject_audit_event_mutation()" in sql
     assert "EXECUTE FUNCTION public.reject_audit_event_mutation()" in sql
+    assert (
+        "REVOKE ALL PRIVILEGES ON FUNCTION "
+        "public.reject_audit_event_mutation() FROM PUBLIC, thinc_app"
+    ) in sql
     assert "Required PostgreSQL role thinc_app is missing" in sql
     assert "thinc_app must have LOGIN" in sql
     assert "GRANT USAGE ON SCHEMA public TO thinc_app" in sql
@@ -102,12 +106,19 @@ def test_app_role_has_only_effective_runtime_privileges(
                 "AND tableowner = current_user"
             )
         ).all()
+        audit_function_execute = connection.execute(
+            text(
+                "SELECT has_function_privilege(current_user, "
+                "'public.reject_audit_event_mutation()', 'EXECUTE')"
+            )
+        ).scalar_one()
 
     assert tuple(role) == ("thinc_app", True, False, False, False, False)
     assert privileged_memberships == []
     assert (database_create, schema_create) == (False, False)
     assert privileges == expected_privileges
     assert app_owned_tables == []
+    assert audit_function_execute is False
 
 
 def test_migration_role_owns_schema_tables(

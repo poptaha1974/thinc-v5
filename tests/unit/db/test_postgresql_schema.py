@@ -59,6 +59,14 @@ def test_assessment_maps_text_domain_id_uniquely_within_tenant() -> None:
         for constraint in table.constraints
         if isinstance(constraint, CheckConstraint)
     )
+    check_constraints = [
+        constraint
+        for constraint in table.constraints
+        if isinstance(constraint, CheckConstraint)
+    ]
+    assert [constraint.name for constraint in check_constraints] == [
+        "ck_assessment_records_domain_assessment_id_non_blank"
+    ]
 
 
 def test_assessment_references_include_tenant_in_foreign_key() -> None:

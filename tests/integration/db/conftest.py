@@ -11,6 +11,7 @@ from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.engine import make_url
 
 from alembic import command
+from thinc_v5.db.migration_config import configure_alembic_url
 
 PROJECT_ROOT = Path(__file__).parents[3]
 
@@ -25,7 +26,14 @@ def alembic_config(database_url: str) -> Config:
     config = Config(str(PROJECT_ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(PROJECT_ROOT / "alembic"))
     config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
+    config.attributes["thinc_explicit_database_url"] = True
     return config
+
+
+def safe_downgrade(config: Config, revision: str = "base") -> None:
+    effective_url = configure_alembic_url(config)
+    _require_disposable_database(effective_url)
+    command.downgrade(config, revision)
 
 
 @pytest.fixture(scope="session")
@@ -53,25 +61,39 @@ def database_url(database_urls: tuple[str, str]) -> str:
     return database_urls[0]
 
 
+@pytest.fixture(scope="session")
+def provisioner_url(database_urls: tuple[str, str]) -> str:
+    url = os.getenv("THINC_TEST_PROVISIONER_DATABASE_URL")
+    if not url:
+        pytest.skip(
+            "THINC_TEST_PROVISIONER_DATABASE_URL is required for role rejection tests"
+        )
+    if not make_url(url).drivername.startswith("postgresql"):
+        pytest.fail("THINC_TEST_PROVISIONER_DATABASE_URL must point to PostgreSQL")
+    if make_url(url).database != make_url(database_urls[0]).database:
+        pytest.fail("provisioner and migration URLs must point to the same database")
+    return url
+
+
 @pytest.fixture
 def migrated_database(
     database_urls: tuple[str, str],
 ) -> Iterator[MigratedDatabase]:
     migration_url, app_url = database_urls
-    _require_disposable_database(migration_url)
     config = alembic_config(migration_url)
-    migration_engine = create_engine(migration_url)
+    effective_migration_url = configure_alembic_url(config)
+    _require_disposable_database(effective_migration_url)
+    migration_engine = create_engine(effective_migration_url)
     app_engine = create_engine(app_url, pool_size=1, max_overflow=0)
     try:
         _verify_connection_roles(migration_engine, app_engine)
-        command.downgrade(config, "base")
+        safe_downgrade(config)
         command.upgrade(config, "head")
         yield MigratedDatabase(migration_engine, app_engine)
     finally:
         app_engine.dispose()
         migration_engine.dispose()
-        _require_disposable_database(migration_url)
-        command.downgrade(config, "base")
+        safe_downgrade(config)
 
 
 def _require_disposable_database(database_url: str) -> None:

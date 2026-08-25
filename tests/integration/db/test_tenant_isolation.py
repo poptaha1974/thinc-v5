@@ -12,7 +12,7 @@ from alembic import command
 from thinc_v5.db.models import BUSINESS_TABLE_NAMES
 from thinc_v5.db.session import set_tenant_context
 
-from .conftest import PROJECT_ROOT, MigratedDatabase, alembic_config
+from .conftest import PROJECT_ROOT, MigratedDatabase, alembic_config, safe_downgrade
 
 
 def test_offline_migration_enables_and_forces_rls_for_every_business_table() -> None:
@@ -33,6 +33,9 @@ def test_offline_migration_enables_and_forces_rls_for_every_business_table() -> 
     assert "uq_assessment_records_tenant_id_id" in sql
     assert "uq_assessment_records_tenant_id_domain_assessment_id" in sql
     assert (
+        "CONSTRAINT ck_assessment_records_domain_assessment_id_non_blank CHECK" in sql
+    )
+    assert (
         "FOREIGN KEY(tenant_id, assessment_id) REFERENCES assessment_records "
         "(tenant_id, id) ON DELETE RESTRICT"
     ) in sql
@@ -45,7 +48,7 @@ def test_upgrade_downgrade_reupgrade_recreates_identical_schema(
     config = alembic_config(database_url)
     first = _schema_snapshot(migrated_database.migration_engine)
 
-    command.downgrade(config, "base")
+    safe_downgrade(config)
     base = _schema_snapshot(migrated_database.migration_engine)
     assert base == _empty_schema_snapshot()
     command.upgrade(config, "head")
@@ -205,6 +208,33 @@ def _schema_snapshot(engine: Engine) -> dict[str, object]:
                 "WHERE ns.nspname = current_schema() "
                 "AND proname = 'reject_audit_event_mutation' ORDER BY proname",
             ),
+            "schema_acl": _rows(
+                connection,
+                "SELECT namespace.nspname, grantor.rolname, grantee.rolname, "
+                "acl.privilege_type, acl.is_grantable "
+                "FROM pg_namespace namespace "
+                "CROSS JOIN LATERAL aclexplode(COALESCE(namespace.nspacl, "
+                "acldefault('n', namespace.nspowner))) acl "
+                "JOIN pg_roles grantor ON grantor.oid = acl.grantor "
+                "JOIN pg_roles grantee ON grantee.oid = acl.grantee "
+                "WHERE namespace.nspname = current_schema() "
+                "AND grantee.rolname = 'thinc_app' "
+                "ORDER BY grantor.rolname, acl.privilege_type",
+            ),
+            "function_acl": _rows(
+                connection,
+                "SELECT routine.proname, grantor.rolname, "
+                "COALESCE(grantee.rolname, 'PUBLIC'), acl.privilege_type, "
+                "acl.is_grantable FROM pg_proc routine "
+                "JOIN pg_namespace namespace ON namespace.oid = routine.pronamespace "
+                "CROSS JOIN LATERAL aclexplode(COALESCE(routine.proacl, "
+                "acldefault('f', routine.proowner))) acl "
+                "JOIN pg_roles grantor ON grantor.oid = acl.grantor "
+                "LEFT JOIN pg_roles grantee ON grantee.oid = acl.grantee "
+                "WHERE namespace.nspname = current_schema() "
+                "AND routine.proname = 'reject_audit_event_mutation' "
+                "ORDER BY grantor.rolname, grantee.rolname, acl.privilege_type",
+            ),
             "triggers": _rows(
                 connection,
                 "SELECT table_name, trigger_name, action_timing, event_manipulation, "
@@ -257,6 +287,8 @@ def _empty_schema_snapshot() -> dict[str, object]:
         "policies": [],
         "rls": [],
         "functions": [],
+        "schema_acl": [],
+        "function_acl": [],
         "triggers": [],
         "grants": [],
         "ownership": [],
