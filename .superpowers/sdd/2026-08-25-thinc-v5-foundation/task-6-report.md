@@ -89,3 +89,33 @@ FastAPI emitted an upstream `asyncio.iscoroutinefunction` deprecation warning on
 - Focused suite: `30 passed, 2 skipped`.
 - Full regression: `94 passed, 19 skipped`.
 - Ruff and mypy: clean.
+
+## Review round 3/5
+
+- Added an explicit execution fencing contract: reservations now carry both an
+  opaque `owner_token` and a monotonic `fencing_epoch`. Every engine-output
+  read/write, lease renewal, completion, and failure transition validates the
+  live token, epoch, assessment ID, state, and lease while holding the same
+  tenant/idempotency advisory lock in PostgreSQL.
+- Active services renew their lease on a heartbeat during engine and gate work.
+  A crashed/non-renewing owner can be replaced after expiry with the same
+  assessment ID and a higher epoch; the stale owner can no longer read or
+  mutate outputs or perform terminal transitions. The in-memory adapter now
+  mirrors lease expiry, renewal, takeover, and fencing semantics.
+- The concurrency test seam now fires only after a follower has actually read
+  a live `PENDING` reservation and is about to wait. Deterministic local tests
+  hold execution beyond the lease duration and prove one engine execution,
+  one output, and one assessment ID while heartbeats prevent takeover.
+- Migration `0004` now takes an exclusive migration lock, quarantines every
+  pre-existing orphan engine output with its tenant, source ID, payload, hash,
+  provenance, original timestamp, reason, and quarantine timestamp, deletes
+  only those copied rows, restores forced RLS, and only then creates the
+  tenant-aware foreign key. Downgrade restores quarantined rows where possible.
+- Focused decision/API/migration suite: `31 passed, 7 skipped`.
+- Security and contract suites: `13 passed`.
+- Full regression: `96 passed, 21 skipped`.
+- Offline migration reconciliation passed. The orphan-upgrade fixture,
+  PostgreSQL stale-writer test, and PostgreSQL active-heartbeat concurrency test
+  skipped because live database URLs were not supplied; they are not counted
+  as successful live PostgreSQL verification.
+- Ruff and mypy across 20 source files: clean.

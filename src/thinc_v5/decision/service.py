@@ -7,7 +7,7 @@ from collections.abc import Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from threading import Condition, RLock
+from threading import Condition, Event, RLock, Thread
 from typing import Any, Literal, Protocol, cast
 from uuid import UUID, uuid4
 
@@ -101,6 +101,7 @@ class StoredEngineOutput:
 class AssessmentReservation:
     assessment_id: str
     owner_token: str
+    fencing_epoch: int
     execute: bool
     response: AssessmentResponse | None = None
 
@@ -109,6 +110,8 @@ class AssessmentReservation:
 class _MemoryReservation:
     assessment_id: str
     owner_token: str
+    fencing_epoch: int
+    lease_expires_at: datetime
     request_hash: str
     state: Literal["PENDING", "FAILED", "COMPLETED"]
     response: AssessmentResponse | None = None
@@ -121,6 +124,9 @@ class StoredApproval:
 
 
 class AssessmentRepository(Protocol):
+    @property
+    def heartbeat_interval_seconds(self) -> float: ...
+
     def reserve_assessment(
         self,
         tenant_id: UUID,
@@ -138,6 +144,14 @@ class AssessmentRepository(Protocol):
         response: AssessmentResponse,
     ) -> None: ...
 
+    def renew_assessment(
+        self,
+        tenant_id: UUID,
+        idempotency_key: str,
+        request_hash: str,
+        reservation: AssessmentReservation,
+    ) -> None: ...
+
     def fail_assessment(
         self,
         tenant_id: UUID,
@@ -150,6 +164,7 @@ class AssessmentRepository(Protocol):
         self,
         tenant_id: UUID,
         assessment_id: str,
+        reservation: AssessmentReservation,
         stored: StoredEngineOutput,
     ) -> None: ...
 
@@ -157,6 +172,7 @@ class AssessmentRepository(Protocol):
         self,
         tenant_id: UUID,
         assessment_id: str,
+        reservation: AssessmentReservation,
         engine_name: str,
     ) -> StoredEngineOutput | None: ...
 
@@ -183,7 +199,21 @@ class AssessmentRepository(Protocol):
 class InMemoryAssessmentRepository:
     """Tenant-isolated test repository; it is not production persistence."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        reservation_lease: timedelta = timedelta(minutes=5),
+        heartbeat_interval_seconds: float | None = None,
+    ) -> None:
+        if reservation_lease <= timedelta(0):
+            raise ValueError("reservation lease must be positive")
+        self._reservation_lease = reservation_lease
+        interval = heartbeat_interval_seconds
+        if interval is None:
+            interval = min(60.0, reservation_lease.total_seconds() / 3)
+        if interval <= 0 or interval >= reservation_lease.total_seconds():
+            raise ValueError("heartbeat interval must be positive and below lease")
+        self._heartbeat_interval_seconds = interval
         self._lock = RLock()
         self._condition = Condition(self._lock)
         self._reservations: dict[tuple[UUID, str], _MemoryReservation] = {}
@@ -193,6 +223,18 @@ class InMemoryAssessmentRepository:
         self._engine_outputs: dict[
             tuple[UUID, str, str], StoredEngineOutput
         ] = {}
+
+    @property
+    def heartbeat_interval_seconds(self) -> float:
+        return self._heartbeat_interval_seconds
+
+    def _on_pending_wait(
+        self,
+        tenant_id: UUID,
+        idempotency_key: str,
+    ) -> None:
+        """Test seam invoked only after a follower observes live PENDING state."""
+        del tenant_id, idempotency_key
 
     def reserve_assessment(
         self,
@@ -210,6 +252,10 @@ class InMemoryAssessmentRepository:
                     stored = _MemoryReservation(
                         assessment_id=str(uuid4()),
                         owner_token=str(uuid4()),
+                        fencing_epoch=1,
+                        lease_expires_at=(
+                            datetime.now(UTC) + self._reservation_lease
+                        ),
                         request_hash=request_hash,
                         state="PENDING",
                     )
@@ -219,11 +265,34 @@ class InMemoryAssessmentRepository:
                     raise IdempotencyConflict
                 if stored.state == "COMPLETED":
                     return _memory_reservation(stored, execute=False)
-                if stored.state == "FAILED":
+                if (
+                    stored.state == "FAILED"
+                    or stored.lease_expires_at <= datetime.now(UTC)
+                ):
                     stored.state = "PENDING"
                     stored.owner_token = str(uuid4())
+                    stored.fencing_epoch += 1
+                    stored.lease_expires_at = (
+                        datetime.now(UTC) + self._reservation_lease
+                    )
                     return _memory_reservation(stored, execute=True)
-                self._condition.wait()
+                self._on_pending_wait(tenant_id, idempotency_key)
+                remaining = (
+                    stored.lease_expires_at - datetime.now(UTC)
+                ).total_seconds()
+                self._condition.wait(timeout=max(0.001, remaining))
+
+    def renew_assessment(
+        self,
+        tenant_id: UUID,
+        idempotency_key: str,
+        request_hash: str,
+        reservation: AssessmentReservation,
+    ) -> None:
+        with self._lock:
+            stored = self._reservations[(tenant_id, idempotency_key)]
+            _require_reservation_owner(stored, request_hash, reservation)
+            stored.lease_expires_at = datetime.now(UTC) + self._reservation_lease
 
     def complete_assessment(
         self,
@@ -260,9 +329,16 @@ class InMemoryAssessmentRepository:
         self,
         tenant_id: UUID,
         assessment_id: str,
+        reservation: AssessmentReservation,
         stored: StoredEngineOutput,
     ) -> None:
         with self._lock:
+            _require_memory_output_owner(
+                self._reservations,
+                tenant_id,
+                assessment_id,
+                reservation,
+            )
             key = (tenant_id, assessment_id, stored.engine_name)
             prior = self._engine_outputs.get(key)
             if prior is not None and prior.output_hash != stored.output_hash:
@@ -273,9 +349,16 @@ class InMemoryAssessmentRepository:
         self,
         tenant_id: UUID,
         assessment_id: str,
+        reservation: AssessmentReservation,
         engine_name: str,
     ) -> StoredEngineOutput | None:
         with self._lock:
+            _require_memory_output_owner(
+                self._reservations,
+                tenant_id,
+                assessment_id,
+                reservation,
+            )
             return deepcopy(
                 self._engine_outputs.get((tenant_id, assessment_id, engine_name))
             )
@@ -321,11 +404,37 @@ class InMemoryAssessmentRepository:
 class SqlAlchemyAssessmentRepository:
     """PostgreSQL adapter that applies Task 5 transaction-local RLS context."""
 
-    _reservation_lease = timedelta(minutes=5)
     _pending_poll_seconds = 0.05
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        reservation_lease: timedelta = timedelta(minutes=5),
+        heartbeat_interval_seconds: float | None = None,
+    ) -> None:
         self._engine = engine
+        if reservation_lease <= timedelta(0):
+            raise ValueError("reservation lease must be positive")
+        self._reservation_lease = reservation_lease
+        interval = heartbeat_interval_seconds
+        if interval is None:
+            interval = min(60.0, reservation_lease.total_seconds() / 3)
+        if interval <= 0 or interval >= reservation_lease.total_seconds():
+            raise ValueError("heartbeat interval must be positive and below lease")
+        self._heartbeat_interval_seconds = interval
+
+    @property
+    def heartbeat_interval_seconds(self) -> float:
+        return self._heartbeat_interval_seconds
+
+    def _on_pending_wait(
+        self,
+        tenant_id: UUID,
+        idempotency_key: str,
+    ) -> None:
+        """Test seam invoked only after a follower observes live PENDING state."""
+        del tenant_id, idempotency_key
 
     def reserve_assessment(
         self,
@@ -354,6 +463,7 @@ class SqlAlchemyAssessmentRepository:
                     payload = _pending_payload(
                         request_hash,
                         owner_token,
+                        1,
                         self._reservation_lease,
                     )
                     connection.execute(
@@ -370,6 +480,7 @@ class SqlAlchemyAssessmentRepository:
                     return AssessmentReservation(
                         assessment_id=assessment_id,
                         owner_token=owner_token,
+                        fencing_epoch=1,
                         execute=True,
                     )
 
@@ -381,6 +492,7 @@ class SqlAlchemyAssessmentRepository:
                     return AssessmentReservation(
                         assessment_id=assessment_id,
                         owner_token="",
+                        fencing_epoch=int(payload.get("fencing_epoch", 0)),
                         execute=False,
                         response=AssessmentResponse.model_validate(
                             payload["response"]
@@ -388,6 +500,7 @@ class SqlAlchemyAssessmentRepository:
                     )
                 if payload["state"] == "FAILED" or _lease_expired(payload):
                     owner_token = str(uuid4())
+                    fencing_epoch = int(payload.get("fencing_epoch", 0)) + 1
                     connection.execute(
                         update(AssessmentRecord)
                         .where(
@@ -398,6 +511,7 @@ class SqlAlchemyAssessmentRepository:
                             assessment=_pending_payload(
                                 request_hash,
                                 owner_token,
+                                fencing_epoch,
                                 self._reservation_lease,
                             ),
                             assessment_hash=request_hash,
@@ -407,11 +521,47 @@ class SqlAlchemyAssessmentRepository:
                     return AssessmentReservation(
                         assessment_id=assessment_id,
                         owner_token=owner_token,
+                        fencing_epoch=fencing_epoch,
                         execute=True,
                     )
                 should_wait = True
             if should_wait:
+                self._on_pending_wait(tenant_id, idempotency_key)
                 time.sleep(self._pending_poll_seconds)
+
+    def renew_assessment(
+        self,
+        tenant_id: UUID,
+        idempotency_key: str,
+        request_hash: str,
+        reservation: AssessmentReservation,
+    ) -> None:
+        with self._engine.begin() as connection:
+            set_tenant_context(connection, tenant_id)
+            _lock_idempotency_key(connection, tenant_id, idempotency_key)
+            assessment_id, payload = _load_reservation(
+                connection,
+                tenant_id,
+                idempotency_key,
+            )
+            _require_database_reservation_owner(
+                assessment_id,
+                payload,
+                request_hash,
+                reservation,
+            )
+            renewed = dict(payload)
+            renewed["lease_expires_at"] = (
+                datetime.now(UTC) + self._reservation_lease
+            ).isoformat()
+            connection.execute(
+                update(AssessmentRecord)
+                .where(
+                    AssessmentRecord.tenant_id == tenant_id,
+                    AssessmentRecord.idempotency_key == idempotency_key,
+                )
+                .values(assessment=renewed)
+            )
 
     def complete_assessment(
         self,
@@ -424,12 +574,13 @@ class SqlAlchemyAssessmentRepository:
         with self._engine.begin() as connection:
             set_tenant_context(connection, tenant_id)
             _lock_idempotency_key(connection, tenant_id, idempotency_key)
-            payload = _load_reservation_payload(
+            assessment_id, payload = _load_reservation(
                 connection,
                 tenant_id,
                 idempotency_key,
             )
             _require_database_reservation_owner(
+                assessment_id,
                 payload,
                 request_hash,
                 reservation,
@@ -445,6 +596,7 @@ class SqlAlchemyAssessmentRepository:
                     assessment={
                         "state": "COMPLETED",
                         "request_hash": request_hash,
+                        "fencing_epoch": reservation.fencing_epoch,
                         "response": response_payload,
                     },
                     assessment_hash=_json_hash(response_payload),
@@ -462,12 +614,13 @@ class SqlAlchemyAssessmentRepository:
         with self._engine.begin() as connection:
             set_tenant_context(connection, tenant_id)
             _lock_idempotency_key(connection, tenant_id, idempotency_key)
-            payload = _load_reservation_payload(
+            assessment_id, payload = _load_reservation(
                 connection,
                 tenant_id,
                 idempotency_key,
             )
             _require_database_reservation_owner(
+                assessment_id,
                 payload,
                 request_hash,
                 reservation,
@@ -482,6 +635,7 @@ class SqlAlchemyAssessmentRepository:
                     assessment={
                         "state": "FAILED",
                         "request_hash": request_hash,
+                        "fencing_epoch": reservation.fencing_epoch,
                         "retry_semantics": (
                             "the next identical request reuses this assessment_id"
                         ),
@@ -494,10 +648,17 @@ class SqlAlchemyAssessmentRepository:
         self,
         tenant_id: UUID,
         assessment_id: str,
+        reservation: AssessmentReservation,
         stored: StoredEngineOutput,
     ) -> None:
         with self._engine.begin() as connection:
             set_tenant_context(connection, tenant_id)
+            _lock_and_require_output_owner(
+                connection,
+                tenant_id,
+                assessment_id,
+                reservation,
+            )
             prior_hash = connection.execute(
                 select(EngineOutputRecord.output_hash).where(
                     EngineOutputRecord.tenant_id == tenant_id,
@@ -525,10 +686,17 @@ class SqlAlchemyAssessmentRepository:
         self,
         tenant_id: UUID,
         assessment_id: str,
+        reservation: AssessmentReservation,
         engine_name: str,
     ) -> StoredEngineOutput | None:
         with self._engine.begin() as connection:
             set_tenant_context(connection, tenant_id)
+            _lock_and_require_output_owner(
+                connection,
+                tenant_id,
+                assessment_id,
+                reservation,
+            )
             row = connection.execute(
                 select(
                     EngineOutputRecord.output,
@@ -667,12 +835,21 @@ class AssessmentService:
             return reservation.response
 
         try:
+            heartbeat = _ReservationHeartbeat(
+                self._repository,
+                tenant_id,
+                idempotency_key,
+                request_hash,
+                reservation,
+            )
+            heartbeat.start()
             assessment_id = reservation.assessment_id
             engine_outputs: dict[str, BaseModel] = {}
             for registration in self._engine_registry.registrations:
                 stored_output = self._repository.get_engine_output(
                     tenant_id,
                     assessment_id,
+                    reservation,
                     registration.name,
                 )
                 if stored_output is None:
@@ -681,6 +858,7 @@ class AssessmentService:
                     self._repository.save_engine_output(
                         tenant_id,
                         assessment_id,
+                        reservation,
                         StoredEngineOutput(
                             engine_name=registration.name,
                             output=output_payload,
@@ -731,6 +909,13 @@ class AssessmentService:
                 uncertainty=economics.uncertainty,
                 provenance=request.provenance,
             )
+            heartbeat.stop_and_verify()
+            self._repository.renew_assessment(
+                tenant_id,
+                idempotency_key,
+                request_hash,
+                reservation,
+            )
             self._repository.complete_assessment(
                 tenant_id,
                 idempotency_key,
@@ -740,6 +925,8 @@ class AssessmentService:
             )
             return response
         except Exception:
+            if "heartbeat" in locals():
+                heartbeat.stop()
             self._repository.fail_assessment(
                 tenant_id,
                 idempotency_key,
@@ -847,6 +1034,7 @@ def _memory_reservation(
     return AssessmentReservation(
         assessment_id=stored.assessment_id,
         owner_token=stored.owner_token if execute else "",
+        fencing_epoch=stored.fencing_epoch,
         execute=execute,
         response=deepcopy(stored.response),
     )
@@ -863,6 +1051,8 @@ def _require_reservation_owner(
         stored.state != "PENDING"
         or stored.assessment_id != reservation.assessment_id
         or stored.owner_token != reservation.owner_token
+        or stored.fencing_epoch != reservation.fencing_epoch
+        or stored.lease_expires_at <= datetime.now(UTC)
     ):
         raise ReservationStateError("assessment reservation ownership was lost")
 
@@ -870,12 +1060,14 @@ def _require_reservation_owner(
 def _pending_payload(
     request_hash: str,
     owner_token: str,
+    fencing_epoch: int,
     lease: timedelta,
 ) -> dict[str, object]:
     return {
         "state": "PENDING",
         "request_hash": request_hash,
         "owner_token": owner_token,
+        "fencing_epoch": fencing_epoch,
         "lease_expires_at": (datetime.now(UTC) + lease).isoformat(),
         "retry_semantics": (
             "a failed or expired owner is retried with the same assessment_id"
@@ -888,23 +1080,27 @@ def _lease_expired(payload: dict[str, Any]) -> bool:
     return lease_expires_at <= datetime.now(UTC)
 
 
-def _load_reservation_payload(
+def _load_reservation(
     connection: Connection,
     tenant_id: UUID,
     idempotency_key: str,
-) -> dict[str, Any]:
-    payload = connection.execute(
-        select(AssessmentRecord.assessment).where(
+) -> tuple[str, dict[str, Any]]:
+    row = connection.execute(
+        select(
+            AssessmentRecord.domain_assessment_id,
+            AssessmentRecord.assessment,
+        ).where(
             AssessmentRecord.tenant_id == tenant_id,
             AssessmentRecord.idempotency_key == idempotency_key,
         )
-    ).scalar_one_or_none()
-    if payload is None:
+    ).one_or_none()
+    if row is None:
         raise ReservationStateError("assessment reservation is missing")
-    return cast(dict[str, Any], payload)
+    return row.domain_assessment_id, cast(dict[str, Any], row.assessment)
 
 
 def _require_database_reservation_owner(
+    assessment_id: str,
     payload: dict[str, Any],
     request_hash: str,
     reservation: AssessmentReservation,
@@ -913,9 +1109,106 @@ def _require_database_reservation_owner(
         raise IdempotencyConflict
     if (
         payload["state"] != "PENDING"
+        or assessment_id != reservation.assessment_id
         or payload["owner_token"] != reservation.owner_token
+        or int(payload.get("fencing_epoch", 0)) != reservation.fencing_epoch
+        or _lease_expired(payload)
     ):
         raise ReservationStateError("assessment reservation ownership was lost")
+
+
+def _require_memory_output_owner(
+    reservations: dict[tuple[UUID, str], _MemoryReservation],
+    tenant_id: UUID,
+    assessment_id: str,
+    reservation: AssessmentReservation,
+) -> None:
+    stored = next(
+        (
+            item
+            for (item_tenant, _), item in reservations.items()
+            if item_tenant == tenant_id and item.assessment_id == assessment_id
+        ),
+        None,
+    )
+    if stored is None:
+        raise ReservationStateError("assessment reservation is missing")
+    _require_reservation_owner(stored, stored.request_hash, reservation)
+
+
+def _lock_and_require_output_owner(
+    connection: Connection,
+    tenant_id: UUID,
+    assessment_id: str,
+    reservation: AssessmentReservation,
+) -> None:
+    idempotency_key = connection.execute(
+        select(AssessmentRecord.idempotency_key).where(
+            AssessmentRecord.tenant_id == tenant_id,
+            AssessmentRecord.domain_assessment_id == assessment_id,
+        )
+    ).scalar_one_or_none()
+    if idempotency_key is None:
+        raise ReservationStateError("assessment reservation is missing")
+    _lock_idempotency_key(connection, tenant_id, idempotency_key)
+    loaded_assessment_id, payload = _load_reservation(
+        connection,
+        tenant_id,
+        idempotency_key,
+    )
+    _require_database_reservation_owner(
+        loaded_assessment_id,
+        payload,
+        str(payload.get("request_hash", "")),
+        reservation,
+    )
+
+
+class _ReservationHeartbeat:
+    def __init__(
+        self,
+        repository: AssessmentRepository,
+        tenant_id: UUID,
+        idempotency_key: str,
+        request_hash: str,
+        reservation: AssessmentReservation,
+    ) -> None:
+        self._repository = repository
+        self._tenant_id = tenant_id
+        self._idempotency_key = idempotency_key
+        self._request_hash = request_hash
+        self._reservation = reservation
+        self._stop = Event()
+        self._error: BaseException | None = None
+        self._thread = Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def _run(self) -> None:
+        interval = self._repository.heartbeat_interval_seconds
+        while not self._stop.wait(interval):
+            try:
+                self._repository.renew_assessment(
+                    self._tenant_id,
+                    self._idempotency_key,
+                    self._request_hash,
+                    self._reservation,
+                )
+            except BaseException as error:
+                self._error = error
+                self._stop.set()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join()
+
+    def stop_and_verify(self) -> None:
+        self.stop()
+        if self._error is not None:
+            raise ReservationStateError(
+                "assessment reservation heartbeat failed"
+            ) from self._error
 
 
 def _stored_approval(record: Row[Any]) -> StoredApproval:

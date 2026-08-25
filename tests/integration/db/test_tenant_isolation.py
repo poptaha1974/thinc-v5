@@ -41,6 +41,86 @@ def test_offline_migration_enables_and_forces_rls_for_every_business_table() -> 
     ) in sql
 
 
+def test_offline_migration_quarantines_orphan_engine_outputs_before_fk() -> None:
+    output = io.StringIO()
+    config = Config(str(PROJECT_ROOT / "alembic.ini"), output_buffer=output)
+    config.set_main_option("script_location", str(PROJECT_ROOT / "alembic"))
+    config.set_main_option("sqlalchemy.url", "postgresql+psycopg://offline")
+
+    command.upgrade(config, "head", sql=True)
+
+    sql = output.getvalue()
+    create_at = sql.index("CREATE TABLE engine_output_quarantine")
+    quarantine_at = sql.index("INSERT INTO engine_output_quarantine")
+    delete_at = sql.index("DELETE FROM engine_output_records")
+    fk_at = sql.index("fk_engine_output_records_assessment_tenant")
+    assert create_at < quarantine_at < delete_at < fk_at
+    assert "NOT EXISTS" in sql[quarantine_at:fk_at]
+    assert "orphaned before tenant-aware assessment foreign key" in sql
+    assert "quarantined_at" in sql
+
+
+def test_upgrade_from_0003_quarantines_existing_orphan_engine_output(
+    database_url: str,
+    migrated_database: MigratedDatabase,
+) -> None:
+    config = alembic_config(database_url)
+    command.downgrade(config, "0003_engine_output_records")
+    tenant_id = uuid.uuid4()
+    output_id = uuid.uuid4()
+    with migrated_database.migration_engine.begin() as connection:
+        connection.execute(
+            text("INSERT INTO tenants (id, slug, name) VALUES (:id, :slug, :name)"),
+            {"id": tenant_id, "slug": f"tenant-{tenant_id}", "name": "Tenant"},
+        )
+        set_tenant_context(connection, tenant_id)
+        connection.execute(
+            text(
+                "INSERT INTO engine_output_records "
+                "(id, tenant_id, assessment_id, engine_name, output, "
+                "output_hash, provenance) VALUES "
+                "(:id, :tenant_id, 'missing-assessment', 'economics', "
+                "CAST(:output AS jsonb), 'sha256:orphan', "
+                "CAST(:provenance AS jsonb))"
+            ),
+            {
+                "id": output_id,
+                "tenant_id": tenant_id,
+                "output": '{"value": "preserve-me"}',
+                "provenance": '{"source_ids": ["legacy-source"]}',
+            },
+        )
+
+    command.upgrade(config, "head")
+
+    with migrated_database.migration_engine.connect() as connection:
+        orphan = connection.execute(
+            text("SELECT id FROM engine_output_records WHERE id = :id"),
+            {"id": output_id},
+        ).one_or_none()
+        quarantined = connection.execute(
+            text(
+                "SELECT tenant_id, source_output_id, assessment_id, engine_name, "
+                "output, output_hash, provenance, quarantine_reason, "
+                "quarantined_at FROM engine_output_quarantine "
+                "WHERE source_output_id = :id"
+            ),
+            {"id": output_id},
+        ).one()
+
+    assert orphan is None
+    assert quarantined.tenant_id == tenant_id
+    assert quarantined.assessment_id == "missing-assessment"
+    assert quarantined.engine_name == "economics"
+    assert quarantined.output == {"value": "preserve-me"}
+    assert quarantined.output_hash == "sha256:orphan"
+    assert quarantined.provenance == {"source_ids": ["legacy-source"]}
+    assert quarantined.quarantine_reason == (
+        "orphaned before tenant-aware assessment foreign key"
+    )
+    assert quarantined.quarantined_at is not None
+
+
 def test_upgrade_downgrade_reupgrade_recreates_identical_schema(
     database_url: str,
     migrated_database: MigratedDatabase,

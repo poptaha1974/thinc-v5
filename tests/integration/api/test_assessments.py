@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from threading import Event, Lock
 from typing import Annotated
 from uuid import UUID, uuid4
 
+import pytest
 from fastapi import Header
 from fastapi.testclient import TestClient
 from sqlalchemy import text
@@ -14,11 +17,12 @@ from thinc_v5.api.app import create_app
 from thinc_v5.db.session import set_tenant_context
 from thinc_v5.decision.service import (
     AssessmentInput,
-    AssessmentReservation,
     EngineRegistration,
     EngineRegistry,
     InMemoryAssessmentRepository,
+    ReservationStateError,
     SqlAlchemyAssessmentRepository,
+    StoredEngineOutput,
 )
 from thinc_v5.domain.economics import EconomicsAssessment
 from thinc_v5.engines.economics import EconomicsEngine
@@ -28,28 +32,20 @@ pytest_plugins = ("tests.integration.db.conftest",)
 
 class ReservationObservingPostgresRepository(SqlAlchemyAssessmentRepository):
     def __init__(self, engine) -> None:
-        super().__init__(engine)
-        self._reservation_lock = Lock()
-        self.reservation_calls = 0
-        self.second_reservation_started = Event()
+        super().__init__(
+            engine,
+            reservation_lease=timedelta(milliseconds=300),
+            heartbeat_interval_seconds=0.05,
+        )
+        self.follower_waiting = Event()
 
-    def reserve_assessment(
+    def _on_pending_wait(
         self,
         tenant_id: UUID,
         idempotency_key: str,
-        request_hash: str,
-        provenance: dict[str, object],
-    ) -> AssessmentReservation:
-        with self._reservation_lock:
-            self.reservation_calls += 1
-            if self.reservation_calls == 2:
-                self.second_reservation_started.set()
-        return super().reserve_assessment(
-            tenant_id,
-            idempotency_key,
-            request_hash,
-            provenance,
-        )
+    ) -> None:
+        del tenant_id, idempotency_key
+        self.follower_waiting.set()
 
 
 def injected_test_identity(
@@ -333,7 +329,10 @@ def test_postgresql_concurrent_idempotency_has_one_executor_and_no_orphans(
             json=complete_assessment_payload(),
         )
         try:
-            assert repository.second_reservation_started.wait(timeout=5)
+            assert repository.follower_waiting.wait(timeout=5)
+            time.sleep(0.7)
+            assert executions == 1
+            assert not second.done()
         finally:
             release_engine.set()
         responses = [first.result(timeout=5), second.result(timeout=5)]
@@ -360,3 +359,80 @@ def test_postgresql_concurrent_idempotency_has_one_executor_and_no_orphans(
         ).scalar_one()
     assert assessment_count == 1
     assert output_count == 1
+
+
+def test_postgresql_expired_owner_is_fenced_after_takeover(
+    migrated_database: MigratedDatabase,
+) -> None:
+    tenant_id = uuid4()
+    with migrated_database.migration_engine.begin() as connection:
+        connection.execute(
+            text("INSERT INTO tenants (id, slug, name) VALUES (:id, :slug, :name)"),
+            {"id": tenant_id, "slug": f"tenant-{tenant_id}", "name": "Tenant"},
+        )
+    repository = SqlAlchemyAssessmentRepository(
+        migrated_database.app_engine,
+        reservation_lease=timedelta(milliseconds=100),
+        heartbeat_interval_seconds=0.02,
+    )
+    provenance: dict[str, object] = {"source_ids": ["source-1"]}
+    stale = repository.reserve_assessment(
+        tenant_id,
+        "postgres-fencing-key",
+        "sha256:request",
+        provenance,
+    )
+    time.sleep(0.2)
+    winner = repository.reserve_assessment(
+        tenant_id,
+        "postgres-fencing-key",
+        "sha256:request",
+        provenance,
+    )
+    winner_output = StoredEngineOutput(
+        engine_name="economics",
+        output={"value": "winner"},
+        output_hash="sha256:winner",
+        provenance=provenance,
+    )
+    repository.save_engine_output(
+        tenant_id,
+        winner.assessment_id,
+        winner,
+        winner_output,
+    )
+
+    assert winner.assessment_id == stale.assessment_id
+    assert winner.fencing_epoch > stale.fencing_epoch
+    with pytest.raises(ReservationStateError):
+        repository.get_engine_output(
+            tenant_id,
+            stale.assessment_id,
+            stale,
+            "economics",
+        )
+    with pytest.raises(ReservationStateError):
+        repository.save_engine_output(
+            tenant_id,
+            stale.assessment_id,
+            stale,
+            StoredEngineOutput(
+                engine_name="economics",
+                output={"value": "stale"},
+                output_hash="sha256:stale",
+                provenance=provenance,
+            ),
+        )
+    with pytest.raises(ReservationStateError):
+        repository.fail_assessment(
+            tenant_id,
+            "postgres-fencing-key",
+            "sha256:request",
+            stale,
+        )
+    assert repository.get_engine_output(
+        tenant_id,
+        winner.assessment_id,
+        winner,
+        "economics",
+    ) == winner_output

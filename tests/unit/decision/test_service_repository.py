@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from threading import Event, Lock
 from uuid import UUID
@@ -17,6 +18,7 @@ from thinc_v5.decision.service import (
     EngineRegistration,
     EngineRegistry,
     InMemoryAssessmentRepository,
+    ReservationStateError,
     SqlAlchemyAssessmentRepository,
     StoredEngineOutput,
 )
@@ -60,44 +62,49 @@ class MarkerOutput(BaseModel):
 
 
 class OutputRecordingRepository(InMemoryAssessmentRepository):
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        *,
+        reservation_lease: timedelta = timedelta(minutes=5),
+        heartbeat_interval_seconds: float | None = None,
+    ) -> None:
+        super().__init__(
+            reservation_lease=reservation_lease,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
+        )
         self.saved_outputs: list[tuple[str, str]] = []
 
     def save_engine_output(
         self,
         tenant_id: UUID,
         assessment_id: str,
+        reservation: AssessmentReservation,
         stored: StoredEngineOutput,
     ) -> None:
         self.saved_outputs.append((assessment_id, stored.engine_name))
-        super().save_engine_output(tenant_id, assessment_id, stored)
+        super().save_engine_output(
+            tenant_id,
+            assessment_id,
+            reservation,
+            stored,
+        )
 
 
 class ReservationObservingRepository(OutputRecordingRepository):
     def __init__(self) -> None:
-        super().__init__()
-        self._reservation_lock = Lock()
-        self.reservation_calls = 0
-        self.second_reservation_started = Event()
+        super().__init__(
+            reservation_lease=timedelta(milliseconds=100),
+            heartbeat_interval_seconds=0.02,
+        )
+        self.follower_waiting = Event()
 
-    def reserve_assessment(
+    def _on_pending_wait(
         self,
         tenant_id: UUID,
         idempotency_key: str,
-        request_hash: str,
-        provenance: dict[str, object],
-    ) -> AssessmentReservation:
-        with self._reservation_lock:
-            self.reservation_calls += 1
-            if self.reservation_calls == 2:
-                self.second_reservation_started.set()
-        return super().reserve_assessment(
-            tenant_id,
-            idempotency_key,
-            request_hash,
-            provenance,
-        )
+    ) -> None:
+        del tenant_id, idempotency_key
+        self.follower_waiting.set()
 
 
 def build_assessment_input() -> AssessmentInput:
@@ -260,7 +267,10 @@ def test_concurrent_duplicate_reserves_one_id_and_executes_engine_once() -> None
         assert engine_started.wait(timeout=5)
         second = executor.submit(create)
         try:
-            assert repository.second_reservation_started.wait(timeout=5)
+            assert repository.follower_waiting.wait(timeout=5)
+            time.sleep(0.25)
+            assert executions == 1
+            assert not second.done()
         finally:
             release_engine.set()
         responses = [first.result(timeout=5), second.result(timeout=5)]
@@ -331,3 +341,91 @@ def test_failed_executor_retry_reuses_reserved_assessment_id() -> None:
     assert {assessment_id for assessment_id, _ in repository.saved_outputs} == {
         failed_assessment_id
     }
+
+
+def test_stale_owner_is_fenced_after_retry_takeover() -> None:
+    repository = InMemoryAssessmentRepository(
+        reservation_lease=timedelta(milliseconds=50),
+        heartbeat_interval_seconds=0.01,
+    )
+    tenant_id = UUID("11111111-1111-4111-8111-111111111111")
+    request_hash = "sha256:request"
+    provenance: dict[str, object] = {"source_ids": ["source-1"]}
+    stale = repository.reserve_assessment(
+        tenant_id,
+        "fencing-key",
+        request_hash,
+        provenance,
+    )
+    time.sleep(0.1)
+    winner = repository.reserve_assessment(
+        tenant_id,
+        "fencing-key",
+        request_hash,
+        provenance,
+    )
+    output = StoredEngineOutput(
+        engine_name="economics",
+        output={"value": "winner"},
+        output_hash="sha256:winner",
+        provenance=provenance,
+    )
+
+    assert winner.assessment_id == stale.assessment_id
+    assert winner.fencing_epoch > stale.fencing_epoch
+    repository.save_engine_output(
+        tenant_id,
+        winner.assessment_id,
+        winner,
+        output,
+    )
+    stale_output = StoredEngineOutput(
+        engine_name="economics",
+        output={"value": "stale"},
+        output_hash="sha256:stale",
+        provenance=provenance,
+    )
+    with pytest.raises(ReservationStateError):
+        repository.get_engine_output(
+            tenant_id,
+            stale.assessment_id,
+            stale,
+            "economics",
+        )
+    with pytest.raises(ReservationStateError):
+        repository.save_engine_output(
+            tenant_id,
+            stale.assessment_id,
+            stale,
+            stale_output,
+        )
+    with pytest.raises(ReservationStateError):
+        repository.fail_assessment(
+            tenant_id,
+            "fencing-key",
+            request_hash,
+            stale,
+        )
+    sample_response = AssessmentService(
+        InMemoryAssessmentRepository()
+    ).create_assessment(
+        tenant_id=tenant_id,
+        actor_id="researcher-1",
+        idempotency_key="sample-response",
+        request=build_assessment_input(),
+    ).model_copy(update={"assessment_id": stale.assessment_id})
+    with pytest.raises(ReservationStateError):
+        repository.complete_assessment(
+            tenant_id,
+            "fencing-key",
+            request_hash,
+            stale,
+            sample_response,
+        )
+
+    assert repository.get_engine_output(
+        tenant_id,
+        winner.assessment_id,
+        winner,
+        "economics",
+    ) == output
