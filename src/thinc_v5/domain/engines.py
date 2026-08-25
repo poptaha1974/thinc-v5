@@ -6,5 +6,4 @@ from thinc_v5.domain.common import Provenance
 
 
 class Engine[InputT, OutputT](Protocol):
-    def assess(self, input: InputT, provenance: Provenance) -> OutputT:
-        ...
+    def assess(self, input: InputT, provenance: Provenance) -> OutputT: ...
