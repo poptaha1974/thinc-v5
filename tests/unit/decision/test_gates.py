@@ -11,6 +11,7 @@ from thinc_v5.domain.decisions import (
     Decision,
     GateContext,
     GateName,
+    GateReasonCode,
     HumanApproval,
 )
 from thinc_v5.domain.economics import EconomicsAssessment
@@ -49,22 +50,30 @@ def find_gate(results: tuple[object, ...], gate_name: GateName):
     return next(result for result in results if result.name is gate_name)
 
 
-def test_scale_is_blocked_by_negative_delivered_profit() -> None:
-    context = GateContext(
-        requested_decision=Decision.SCALE,
-        assessment_id="assess-1",
-        economics_assessment=build_assessment(delivered_profit=Decimal("-1")),
-        compliance_passed=True,
-        liquidity_passed=True,
-        data_quality_passed=True,
-        sample_size_passed=True,
-        operational_recency_passed=True,
-        stop_loss_registered=True,
-        human_approval=HumanApproval(
+def build_scale_context(**overrides: object) -> GateContext:
+    context_data: dict[str, object] = {
+        "requested_decision": Decision.SCALE,
+        "assessment_id": "assess-1",
+        "economics_assessment": build_assessment(),
+        "compliance_passed": True,
+        "liquidity_passed": True,
+        "data_quality_passed": True,
+        "sample_size_passed": True,
+        "operational_recency_passed": True,
+        "stop_loss_registered": True,
+        "human_approval": HumanApproval(
             approver_id="approver-1",
             approved_at=datetime.now(UTC),
             assessment_id="assess-1",
         ),
+    }
+    context_data.update(overrides)
+    return GateContext(**context_data)
+
+
+def test_scale_is_blocked_by_negative_delivered_profit() -> None:
+    context = build_scale_context(
+        economics_assessment=build_assessment(delivered_profit=Decimal("-1")),
     )
 
     results = evaluate_gates(context)
@@ -79,16 +88,8 @@ def test_scale_is_blocked_by_negative_delivered_profit() -> None:
 
 
 def test_scale_requires_human_approval_for_exact_assessment_id() -> None:
-    context = GateContext(
-        requested_decision=Decision.SCALE,
+    context = build_scale_context(
         assessment_id="assess-expected",
-        economics_assessment=build_assessment(),
-        compliance_passed=True,
-        liquidity_passed=True,
-        data_quality_passed=True,
-        sample_size_passed=True,
-        operational_recency_passed=True,
-        stop_loss_registered=True,
         human_approval=HumanApproval(
             approver_id="approver-1",
             approved_at=datetime.now(UTC),
@@ -103,6 +104,81 @@ def test_scale_requires_human_approval_for_exact_assessment_id() -> None:
     assert approval_gate.passed is False
     assert approval_gate.blocks_decision is True
     assert "exact assessment" in approval_gate.reason.lower()
+
+
+@pytest.mark.parametrize(
+    ("gate_name", "context_kwargs"),
+    [
+        (GateName.COMPLIANCE, {"compliance_passed": False}),
+        (GateName.LIQUIDITY, {"liquidity_passed": False}),
+        (
+            GateName.DELIVERED_PROFIT,
+            {"economics_assessment": build_assessment(delivered_profit=Decimal("-1"))},
+        ),
+        (GateName.DATA_QUALITY, {"data_quality_passed": False}),
+        (GateName.SAMPLE_SIZE, {"sample_size_passed": False}),
+        (
+            GateName.OPERATIONAL_RECENCY,
+            {"operational_recency_passed": False},
+        ),
+        (GateName.HUMAN_APPROVAL, {"human_approval": None}),
+    ],
+)
+def test_scale_blocks_each_failed_gate_independently(
+    gate_name: GateName,
+    context_kwargs: dict[str, object],
+) -> None:
+    results = evaluate_gates(build_scale_context(**context_kwargs))
+
+    targeted_gate = find_gate(results, gate_name)
+
+    assert targeted_gate.passed is False
+    assert targeted_gate.blocks_decision is True
+    assert targeted_gate.override_allowed is False
+
+
+@pytest.mark.parametrize(
+    ("context_kwargs", "expected_reason_code"),
+    [
+        (
+            {"compliance_passed": False, "stop_loss_registered": True},
+            GateReasonCode.COMPLIANCE_REVIEW_FAILED,
+        ),
+        (
+            {
+                "requested_decision": Decision.TEST,
+                "compliance_passed": True,
+                "stop_loss_registered": False,
+            },
+            GateReasonCode.STOP_LOSS_NOT_REGISTERED,
+        ),
+    ],
+)
+def test_compliance_reason_code_distinguishes_review_failure_from_missing_stop_loss(
+    context_kwargs: dict[str, object],
+    expected_reason_code: GateReasonCode,
+) -> None:
+    context_data: dict[str, object] = {
+        "requested_decision": Decision.TEST,
+        "assessment_id": "assess-1",
+        "economics_assessment": build_assessment(),
+        "compliance_passed": True,
+        "liquidity_passed": True,
+        "data_quality_passed": True,
+        "sample_size_passed": True,
+        "operational_recency_passed": True,
+        "stop_loss_registered": True,
+        "human_approval": None,
+    }
+    context_data.update(context_kwargs)
+
+    results = evaluate_gates(GateContext(**context_data))
+
+    compliance_gate = find_gate(results, GateName.COMPLIANCE)
+
+    assert compliance_gate.passed is False
+    assert compliance_gate.blocks_decision is True
+    assert compliance_gate.reason_code is expected_reason_code
 
 
 @pytest.mark.parametrize(

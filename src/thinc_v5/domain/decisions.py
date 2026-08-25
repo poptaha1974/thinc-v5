@@ -30,6 +30,20 @@ class GateName(str, Enum):
     HUMAN_APPROVAL = "HUMAN_APPROVAL"
 
 
+class GateReasonCode(str, Enum):
+    PASSED = "PASSED"
+    COMPLIANCE_REVIEW_FAILED = "COMPLIANCE_REVIEW_FAILED"
+    STOP_LOSS_NOT_REGISTERED = "STOP_LOSS_NOT_REGISTERED"
+    LIQUIDITY_FAILED = "LIQUIDITY_FAILED"
+    DELIVERED_PROFIT_MISSING = "DELIVERED_PROFIT_MISSING"
+    DELIVERED_PROFIT_NON_POSITIVE = "DELIVERED_PROFIT_NON_POSITIVE"
+    DATA_QUALITY_FAILED = "DATA_QUALITY_FAILED"
+    SAMPLE_SIZE_FAILED = "SAMPLE_SIZE_FAILED"
+    OPERATIONAL_RECENCY_FAILED = "OPERATIONAL_RECENCY_FAILED"
+    HUMAN_APPROVAL_MISSING = "HUMAN_APPROVAL_MISSING"
+    HUMAN_APPROVAL_ASSESSMENT_MISMATCH = "HUMAN_APPROVAL_ASSESSMENT_MISMATCH"
+
+
 class HumanApproval(BaseModel):
     approver_id: NonBlankStr
     approved_at: datetime
@@ -61,4 +75,5 @@ class GateResult(BaseModel):
     passed: bool
     blocks_decision: bool
     override_allowed: Literal[False] = False
+    reason_code: GateReasonCode
     reason: NonBlankStr

@@ -41,3 +41,34 @@ Date: 2026-08-25
 
 - To preserve the repository-wide formatter gate, `src/thinc_v5/domain/engines.py` received a formatter-only one-line style update.
 - The TEST decision folds the `stop_loss_registered` prerequisite into the COMPLIANCE gate because the brief fixed the gate names to the seven required gate contracts.
+
+## Fix Round 1
+
+### Scope
+
+- Added a parameterized SCALE regression that drops each required gate independently and asserts `passed=False`, `blocks_decision=True`, and `override_allowed=False` for `COMPLIANCE`, `LIQUIDITY`, `DELIVERED_PROFIT`, `DATA_QUALITY`, `SAMPLE_SIZE`, `OPERATIONAL_RECENCY`, and `HUMAN_APPROVAL`.
+- Added typed `GateReasonCode` values so COMPLIANCE distinguishes `COMPLIANCE_REVIEW_FAILED` from `STOP_LOSS_NOT_REGISTERED` without string parsing.
+
+### TDD Evidence
+
+1. Expanded `tests/unit/decision/test_gates.py` first with the new SCALE matrix and compliance reason-code assertions.
+2. Verified RED with:
+   - `.\.venv\Scripts\python.exe -m pytest tests/unit/decision/test_gates.py -v`
+   - Failure:
+     - `ImportError: cannot import name 'GateReasonCode' from 'thinc_v5.domain.decisions'`
+3. Implemented the minimal contract and gate changes in `src/thinc_v5/domain/decisions.py` and `src/thinc_v5/decision/gates.py`.
+4. Verified focused GREEN with:
+   - `.\.venv\Scripts\python.exe -m pytest tests/unit/decision/test_gates.py -v`
+   - Result: `19 passed in 2.05s`
+
+### Verification Run
+
+- `.\.venv\Scripts\python.exe -m ruff check .`
+  - Output: `All checks passed!`
+- `.\.venv\Scripts\python.exe -m ruff format --check .`
+  - Output: `16 files already formatted`
+- `.\.venv\Scripts\python.exe -m mypy src`
+  - Output: `Success: no issues found in 10 source files`
+- `.\.venv\Scripts\python.exe -m pytest --cov=thinc_v5 --cov-fail-under=90 -v`
+  - Output: `38 passed in 5.69s`
+  - Coverage: `95.65%`
