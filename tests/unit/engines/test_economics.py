@@ -4,6 +4,7 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
+import thinc_v5.engines.economics as economics_module
 from thinc_v5.domain.common import MissingnessStatus, Provenance
 from thinc_v5.domain.economics import EconomicsInput
 from thinc_v5.engines.economics import EconomicsEngine
@@ -111,3 +112,26 @@ def test_negative_delivered_orders_are_rejected() -> None:
             variable_operations_cost=Decimal("60"),
             delivered_orders=-1,
         )
+
+
+def test_runtime_guard_raises_if_missing_values_reach_computation_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(economics_module, "MONEY_FIELDS", ())
+
+    data = EconomicsInput(
+        collected_revenue=None,
+        product_cost=Decimal("300"),
+        ad_spend=Decimal("200"),
+        shipping=Decimal("80"),
+        collection_fees=Decimal("20"),
+        return_cost=Decimal("40"),
+        variable_operations_cost=Decimal("60"),
+        delivered_orders=10,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="economics computation received unexpected missing values",
+    ):
+        EconomicsEngine().assess(data, build_provenance())

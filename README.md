@@ -73,6 +73,13 @@ The research-preview docs test is:
 .\.venv\Scripts\python.exe -m pytest tests/docs/test_required_disclosures.py -v
 ```
 
+The PowerShell-safe literal-secret scan is:
+
+```powershell
+$pattern = '(?i)\b(?:api[_-]?key|client[_-]?secret|secret(?:[_-]?key)?|access[_-]?token|refresh[_-]?token|password)\b\s*[:=]\s*(?:"[^"]+"|''[^'']+''|[^\s$<][^\r\n#;]*)'
+git grep -nP -- "$pattern" -- . ':(exclude).env.example'
+```
+
 ### 6. Start the API
 
 This startup path is fail-closed. It starts only when

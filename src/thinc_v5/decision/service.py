@@ -491,7 +491,7 @@ class SqlAlchemyAssessmentRepository:
                 if payload["state"] == "COMPLETED":
                     return AssessmentReservation(
                         assessment_id=assessment_id,
-                        owner_token="",
+                        owner_token=str(uuid4()),
                         fencing_epoch=int(payload.get("fencing_epoch", 0)),
                         execute=False,
                         response=AssessmentResponse.model_validate(payload["response"]),
@@ -1036,7 +1036,7 @@ def _memory_reservation(
 ) -> AssessmentReservation:
     return AssessmentReservation(
         assessment_id=stored.assessment_id,
-        owner_token=stored.owner_token if execute else "",
+        owner_token=stored.owner_token if execute else str(uuid4()),
         fencing_epoch=stored.fencing_epoch,
         execute=execute,
         response=deepcopy(stored.response),

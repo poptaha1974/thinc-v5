@@ -20,6 +20,7 @@ from thinc_v5.decision.service import (
     InMemoryAssessmentRepository,
 )
 from thinc_v5.domain.economics import EconomicsAssessment
+from thinc_v5.engines.economics import EconomicsEngine
 
 
 def injected_test_identity(
@@ -51,8 +52,38 @@ def test_openapi_has_no_high_impact_action_paths() -> None:
     assert "/v1/assessments/{assessment_id}/scale" not in paths
 
 
+def test_unknown_route_uses_problem_details_http_handler() -> None:
+    response = build_client().get("/does-not-exist")
+
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert response.json()["title"] == "HTTP request failed"
+
+
 def test_approval_is_bound_to_tenant_and_does_not_recompute_stored_results() -> None:
-    client = build_client()
+    executions = 0
+    economics_engine = EconomicsEngine()
+
+    def counting_economics(request: AssessmentInput) -> EconomicsAssessment:
+        nonlocal executions
+        executions += 1
+        return economics_engine.assess(request.economics, request.provenance)
+
+    client = TestClient(
+        create_app(
+            repository=InMemoryAssessmentRepository(),
+            identity_provider=injected_test_identity,
+            engine_registry=EngineRegistry(
+                (
+                    EngineRegistration(
+                        name="economics",
+                        run=counting_economics,
+                        output_model=EconomicsAssessment,
+                    ),
+                )
+            ),
+        )
+    )
     created = client.post(
         "/v1/assessments",
         headers={**TENANT_A_HEADERS, "Idempotency-Key": "approval-create"},
@@ -61,6 +92,7 @@ def test_approval_is_bound_to_tenant_and_does_not_recompute_stored_results() -> 
     assessment_id = created["assessment_id"]
     economics_before = created["data"]["economics"]
     gate_results_before = created["data"]["gate_results"]
+    assert executions == 1
 
     cross_tenant = client.post(
         f"/v1/assessments/{assessment_id}/approvals",
@@ -86,6 +118,7 @@ def test_approval_is_bound_to_tenant_and_does_not_recompute_stored_results() -> 
     }
     assert fetched.json()["data"]["economics"] == economics_before
     assert fetched.json()["data"]["gate_results"] == gate_results_before
+    assert executions == 1
 
 
 def test_approval_post_requires_idempotency_key() -> None:
@@ -190,6 +223,21 @@ def test_create_rejects_blank_tenant_header_with_problem_details() -> None:
             **TENANT_A_HEADERS,
             "X-Tenant-ID": "   ",
             "Idempotency-Key": "invalid-tenant-create",
+        },
+        json=complete_assessment_payload(),
+    )
+
+    assert response.status_code == 422
+    assert response.headers["content-type"].startswith("application/problem+json")
+
+
+def test_create_rejects_overlong_tenant_header_with_problem_details() -> None:
+    response = build_client().post(
+        "/v1/assessments",
+        headers={
+            **TENANT_A_HEADERS,
+            "X-Tenant-ID": "1" * 37,
+            "Idempotency-Key": "invalid-tenant-length-create",
         },
         json=complete_assessment_payload(),
     )

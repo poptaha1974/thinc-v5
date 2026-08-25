@@ -46,6 +46,35 @@ def test_model_card_has_required_research_preview_headings() -> None:
 def test_datasheet_and_pilot_protocol_disclose_governance_constraints() -> None:
     datasheet = read_text("docs/governance/datasheet.md")
     protocol = read_text("docs/governance/pilot-protocol.md")
+    delivered_profit_equation = (
+        "`collected_revenue - product_cost - ad_spend - shipping - "
+        "collection_fees - return_cost - variable_operations_cost`"
+    )
+    ordered_gates = (
+        r"The exact seven gates are:\n\n"
+        r"1\. `COMPLIANCE`\n"
+        r"2\. `LIQUIDITY`\n"
+        r"3\. `DELIVERED_PROFIT`\n"
+        r"4\. `DATA_QUALITY`\n"
+        r"5\. `SAMPLE_SIZE`\n"
+        r"6\. `OPERATIONAL_RECENCY`\n"
+        r"7\. `HUMAN_APPROVAL`"
+    )
+    mapped_windows = (
+        r"- Intermediate outcomes at 30 days: early operational recency, approval\n"
+        r"  latency, evidence completeness, and stop-loss triggers\.\n"
+        r"- Primary delivered contribution outcomes at 60 days: delivered "
+        r"contribution\n"
+        r"  profit and profit per delivered order\.\n"
+        r"- Intermediate outcomes at 90 days: persistence of delivered contribution,\n"
+        r"  operational stability, and evidence quality\.\n"
+        r"- Primary delivered contribution outcomes at 180 days: delivered "
+        r"contribution\n"
+        r"  profit, profit per delivered order, and cash recovery behavior\.\n"
+        r"- Follow-up outcomes at 365 days: persistence, retention, repeat "
+        r"purchase, and\n"
+        r"  medium-term operational durability\."
+    )
 
     assert re.search(r"^## Delivered Profit Equation$", datasheet, flags=re.MULTILINE)
     assert re.search(r"^## Decision Gates$", datasheet, flags=re.MULTILINE)
@@ -58,20 +87,8 @@ def test_datasheet_and_pilot_protocol_disclose_governance_constraints() -> None:
         datasheet,
         flags=re.MULTILINE,
     )
-    assert (
-        "`collected_revenue - product_cost - ad_spend - shipping - "
-        "collection_fees - return_cost - variable_operations_cost`"
-    ) in datasheet
-    for gate_name in (
-        "`COMPLIANCE`",
-        "`LIQUIDITY`",
-        "`DELIVERED_PROFIT`",
-        "`DATA_QUALITY`",
-        "`SAMPLE_SIZE`",
-        "`OPERATIONAL_RECENCY`",
-        "`HUMAN_APPROVAL`",
-    ):
-        assert gate_name in datasheet
+    assert delivered_profit_equation in datasheet
+    assert re.search(ordered_gates, datasheet)
     for field_name in (
         "schema_version",
         "model_version",
@@ -87,14 +104,7 @@ def test_datasheet_and_pilot_protocol_disclose_governance_constraints() -> None:
         "decision_reasons",
     ):
         assert field_name in datasheet
-    for window_label in (
-        "30 days",
-        "60 days",
-        "90 days",
-        "180 days",
-        "365 days",
-    ):
-        assert window_label in datasheet
+    assert re.search(mapped_windows, datasheet)
     for phrase in (
         "Baseline comparison against manual review and simpler rule baselines.",
         "Group-aware and time-aware train, validation, and holdout splits.",
@@ -122,32 +132,54 @@ def test_datasheet_and_pilot_protocol_disclose_governance_constraints() -> None:
 def test_release_checklist_and_readme_disclose_known_blockers() -> None:
     release_checklist = read_text("docs/governance/release-checklist.md")
     readme = read_text("README.md")
+    startup_command = (
+        ".\\.venv\\Scripts\\python.exe -m uvicorn "
+        "thinc_v5.api.devserver:create_dev_app --factory --host 127.0.0.1 "
+        "--port 8000"
+    )
+    credential_pattern_prefix = (
+        "$pattern = "
+        "'(?i)\\b(?:api[_-]?key|client[_-]?secret|secret(?:[_-]?key)?|"
+        "access[_-]?token|refresh[_-]?token|password)\\b"
+    )
+    exact_status_lines = (
+        "Credential scan current status: PASSED "
+        "(literal-secret scan returned no matches on 2026-08-25).",
+        "Coverage current status: PASSED (90.13% on 2026-08-25 local full suite).",
+        "Bandit current status: PASSED "
+        "(0 issues, 0 skipped on 2026-08-25 local Python 3.14.4 scan).",
+        "pip-audit current status: PASSED "
+        "(No known vulnerabilities found on 2026-08-25; local package "
+        "`thinc-v5` was skipped because it is not published on PyPI).",
+        "Live PostgreSQL verification status: PENDING.",
+        "Python 3.12 CI verification status: PENDING.",
+        "Production authentication status: ABSENT.",
+        "Python 3.12 full CI verification remains pending:",
+        "Live PostgreSQL verification remains pending, including live "
+        "PostgreSQL tests.",
+        "Production authentication remains absent.",
+    )
 
     assert re.search(r"^## Release Blockers$", release_checklist, flags=re.MULTILINE)
+    assert re.search(
+        r"^## Current Verification Status$",
+        release_checklist,
+        flags=re.MULTILINE,
+    )
     assert "## Safe Startup" in readme
     assert "Synthetic-only startup" in readme
     assert "Production authentication is not implemented." in readme
     assert 'THINC_ENABLE_INSECURE_TEST_IDENTITY = "true"' in readme
-    assert (
-        ".\\.venv\\Scripts\\python.exe -m uvicorn "
-        "thinc_v5.api.devserver:create_dev_app --factory --host 127.0.0.1 "
-        "--port 8000"
-    ) in readme
+    assert startup_command in readme
     assert "HeaderTestIdentityProvider" in readme
     assert "There is no `SCALE` endpoint." in readme
+    assert credential_pattern_prefix in readme
+    assert "git grep -nP -- \"$pattern\" -- . ':(exclude).env.example'" in readme
     assert "Synthetic test data cannot establish scientific performance." in readme
     assert (
         "Approval records do not recompute or mutate stored economics outputs or stored"
         in readme
     )
     assert "gate results. There is no `SCALE` endpoint." in readme
-    for blocker in (
-        "Python 3.12 full CI verification pending:",
-        "`ruff format --check .`, `ruff check .`, `mypy src`,",
-        "`pytest --cov=thinc_v5 --cov-fail-under=90`, `bandit -r src`,",
-        "and `pip-audit`.",
-        "Live PostgreSQL verification pending, including live PostgreSQL tests.",
-        "Refined credential scan must pass with no assigned literal secrets.",
-        "Production authentication is not implemented.",
-    ):
-        assert blocker in release_checklist
+    for status_line in exact_status_lines:
+        assert status_line in release_checklist

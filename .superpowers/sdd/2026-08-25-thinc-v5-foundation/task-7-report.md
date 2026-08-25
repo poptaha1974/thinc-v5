@@ -166,3 +166,77 @@ Manual / static checks:
 - Bandit remains unreliable on Python 3.14 in this environment.
 - `pip-audit` is currently failing because of `starlette` vulnerabilities in the
   installed environment.
+
+## Round 2 Follow-Up
+
+### Dependency and security updates
+
+- Verified current package metadata from PyPI before changing constraints:
+  - `fastapi 0.141.1` requires Python `>=3.10` and depends on
+    `starlette>=0.46.0`.
+  - `starlette 1.6.0` requires Python `>=3.10`.
+  - `bandit 1.9.4`, `pip-audit 2.10.1`, and `uvicorn 0.52.4` all support
+    Python `>=3.10`.
+- Updated `pyproject.toml` to:
+  - move FastAPI to `fastapi~=0.141.0`
+  - pin direct Starlette coverage at `starlette~=1.6.0`
+  - move Bandit to `bandit~=1.9.0`
+  - move `pip-audit` to `pip-audit~=2.10.0`
+  - add `uvicorn~=0.52.0`
+- Preserved the declared Pydantic v2 line without widening or downgrading it.
+- Removed Bandit findings by:
+  - replacing empty-string reservation owner tokens with generated UUID values
+  - replacing the economics `assert` with an explicit runtime guard
+
+### Coverage and docs completeness work
+
+- Added focused tests for uncovered decision-service, repository, session, and
+  domain branches:
+  - `tests/unit/decision/test_service_additional.py`
+  - `tests/unit/decision/test_service_sql_repository.py`
+  - `tests/unit/db/test_session.py`
+  - extra edge-case coverage in existing API, security, domain, and economics
+    tests
+- Strengthened docs completeness checks so they now enforce:
+  - the exact delivered-profit equation
+  - the exact ordered seven-gate list
+  - exact 30/60/90/180/365 outcome windows
+  - safe-startup warning and exact local `uvicorn` command
+  - exact release-checklist blocker and verification-status entries
+- Approval records are explicitly tested not to recompute stored gate results or
+  stored economics outputs after approval replay.
+
+### Final verification evidence
+
+- `.\.venv\Scripts\python.exe -m ruff format .`
+  -> passed (`3 files reformatted, 49 files left unchanged`).
+- `.\.venv\Scripts\python.exe -m ruff check .`
+  -> passed (`All checks passed!`).
+- `.\.venv\Scripts\python.exe -m ruff format --check .`
+  -> passed (`52 files already formatted`).
+- `.\.venv\Scripts\python.exe -m mypy src`
+  -> passed (`Success: no issues found in 21 source files`).
+- `.\.venv\Scripts\python.exe -m pytest tests/docs/test_required_disclosures.py -v`
+  -> passed (`3 passed`).
+- `.\.venv\Scripts\python.exe -m pytest --cov=thinc_v5 --cov-fail-under=90`
+  -> passed (`130 passed, 23 skipped`), total coverage `90.13%`.
+- `.\.venv\Scripts\python.exe -m bandit -r src`
+  -> passed (`No issues identified`, `Files skipped (0)`).
+- `.\.venv\Scripts\python.exe -m pip_audit`
+  -> passed (`No known vulnerabilities found`);
+    local package `thinc-v5` was skipped because it is not published on PyPI.
+- PowerShell-safe literal-secret scan:
+  ```powershell
+  $pattern = '(?i)\b(?:api[_-]?key|client[_-]?secret|secret(?:[_-]?key)?|access[_-]?token|refresh[_-]?token|password)\b\s*[:=]\s*(?:"[^"]+"|''[^'']+''|[^\s$<][^\r\n#;]*)'
+  git grep -nP -- "$pattern" -- . ':(exclude).env.example'
+  ```
+  -> returned no matches.
+
+### Current honest blockers
+
+- Python 3.12 full CI verification remains pending.
+- Live PostgreSQL verification remains pending; live PostgreSQL tests were not
+  run locally in this task.
+- Production authentication remains absent by design in Foundation.
+- Temporal and external validation remain pending, so no validated,
+  field-tested, predictive, or causal claim is authorized.

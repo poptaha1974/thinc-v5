@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import cast
 
 from thinc_v5.domain.common import MissingnessStatus, Provenance, Uncertainty
 from thinc_v5.domain.economics import (
@@ -49,13 +50,29 @@ class EconomicsEngine(Engine[EconomicsInput, EconomicsAssessment]):
         return_cost = input.return_cost
         variable_operations_cost = input.variable_operations_cost
 
-        assert collected_revenue is not None
-        assert product_cost is not None
-        assert ad_spend is not None
-        assert shipping is not None
-        assert collection_fees is not None
-        assert return_cost is not None
-        assert variable_operations_cost is not None
+        if any(
+            value is None
+            for value in (
+                collected_revenue,
+                product_cost,
+                ad_spend,
+                shipping,
+                collection_fees,
+                return_cost,
+                variable_operations_cost,
+            )
+        ):
+            raise RuntimeError(
+                "economics computation received unexpected missing values"
+            )
+
+        collected_revenue = cast(Decimal, collected_revenue)
+        product_cost = cast(Decimal, product_cost)
+        ad_spend = cast(Decimal, ad_spend)
+        shipping = cast(Decimal, shipping)
+        collection_fees = cast(Decimal, collection_fees)
+        return_cost = cast(Decimal, return_cost)
+        variable_operations_cost = cast(Decimal, variable_operations_cost)
 
         delivered_contribution_profit = (
             collected_revenue

@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
 from pydantic import ValidationError
 
 from thinc_v5.domain.common import (
@@ -116,6 +117,17 @@ def test_uncertainty_rejects_empty_method_and_note_entries() -> None:
         assert "notes" in message
     else:
         raise AssertionError("uncertainty strings must not be empty")
+
+
+def test_uncertainty_rejects_inverted_bounds() -> None:
+    with pytest.raises(
+        ValidationError, match="lower must be less than or equal to upper"
+    ):
+        Uncertainty(
+            method="credible_interval",
+            lower=Decimal("5.0"),
+            upper=Decimal("4.0"),
+        )
 
 
 def test_research_preview_result_requires_decision_reasons() -> None:
