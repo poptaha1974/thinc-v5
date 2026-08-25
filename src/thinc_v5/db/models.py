@@ -4,7 +4,16 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, func
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -59,8 +68,31 @@ class EvidenceRecord(IdMixin, TenantOwnedMixin, CreatedAtMixin, Base):
 
 
 class AssessmentRecord(IdMixin, TenantOwnedMixin, CreatedAtMixin, Base):
-    __tablename__ = "assessment_records"
+    """Persistence UUID plus tenant-scoped mapping to the domain text ID."""
 
+    __tablename__ = "assessment_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "id",
+            name="uq_assessment_records_tenant_id_id",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "domain_assessment_id",
+            name="uq_assessment_records_tenant_id_domain_assessment_id",
+        ),
+        CheckConstraint(
+            "btrim(domain_assessment_id) <> ''",
+            name="domain_assessment_id_non_blank",
+        ),
+    )
+
+    domain_assessment_id: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        comment="Text assessment_id from the domain model",
+    )
     assessment: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     assessment_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     provenance: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
@@ -68,10 +100,17 @@ class AssessmentRecord(IdMixin, TenantOwnedMixin, CreatedAtMixin, Base):
 
 class DecisionRecord(IdMixin, TenantOwnedMixin, CreatedAtMixin, Base):
     __tablename__ = "decision_records"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "assessment_id"],
+            ["assessment_records.tenant_id", "assessment_records.id"],
+            name="fk_decision_records_assessment_tenant",
+            ondelete="RESTRICT",
+        ),
+    )
 
     assessment_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("assessment_records.id", ondelete="RESTRICT"),
         nullable=False,
         index=True,
     )
@@ -83,10 +122,17 @@ class DecisionRecord(IdMixin, TenantOwnedMixin, CreatedAtMixin, Base):
 
 class HumanApprovalRecord(IdMixin, TenantOwnedMixin, CreatedAtMixin, Base):
     __tablename__ = "human_approval_records"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "assessment_id"],
+            ["assessment_records.tenant_id", "assessment_records.id"],
+            name="fk_human_approval_records_assessment_tenant",
+            ondelete="RESTRICT",
+        ),
+    )
 
     assessment_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("assessment_records.id", ondelete="RESTRICT"),
         nullable=False,
         index=True,
     )

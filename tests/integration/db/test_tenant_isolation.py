@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import io
 import uuid
+from typing import Any
 
+import pytest
 from alembic.config import Config
-from sqlalchemy import Connection, inspect, text
+from sqlalchemy import Engine, exc, inspect, text
 
 from alembic import command
 from thinc_v5.db.models import BUSINESS_TABLE_NAMES
+from thinc_v5.db.session import set_tenant_context
 
-from .conftest import PROJECT_ROOT, alembic_config
+from .conftest import PROJECT_ROOT, MigratedDatabase, alembic_config
 
 
 def test_offline_migration_enables_and_forces_rls_for_every_business_table() -> None:
@@ -26,133 +29,236 @@ def test_offline_migration_enables_and_forces_rls_for_every_business_table() -> 
         assert f"ALTER TABLE {table_name} FORCE ROW LEVEL SECURITY" in sql
         assert f"CREATE POLICY tenant_isolation ON {table_name}" in sql
     assert "current_setting('app.tenant_id', true)::uuid" in sql
+    assert "domain_assessment_id VARCHAR(255) NOT NULL" in sql
+    assert "uq_assessment_records_tenant_id_id" in sql
+    assert "uq_assessment_records_tenant_id_domain_assessment_id" in sql
+    assert (
+        "FOREIGN KEY(tenant_id, assessment_id) REFERENCES assessment_records "
+        "(tenant_id, id) ON DELETE RESTRICT"
+    ) in sql
 
 
 def test_upgrade_downgrade_reupgrade_recreates_identical_schema(
     database_url: str,
+    migrated_database: MigratedDatabase,
 ) -> None:
     config = alembic_config(database_url)
+    first = _schema_snapshot(migrated_database.migration_engine)
+
     command.downgrade(config, "base")
+    base = _schema_snapshot(migrated_database.migration_engine)
+    assert base == _empty_schema_snapshot()
     command.upgrade(config, "head")
 
-    first = _schema_snapshot(database_url)
-    command.downgrade(config, "base")
-    command.upgrade(config, "head")
-
-    assert _schema_snapshot(database_url) == first
+    assert _schema_snapshot(migrated_database.migration_engine) == first
 
 
 def test_assessments_cannot_be_read_across_tenants(
-    migrated_connection: Connection,
+    migrated_database: MigratedDatabase,
 ) -> None:
-    bypasses_rls = migrated_connection.execute(
-        text(
-            "SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user"
-        )
-    ).scalar_one()
-    assert bypasses_rls is False, (
-        "THINC_TEST_DATABASE_URL must use a non-superuser, non-BYPASSRLS role"
-    )
-
-    tenant_a = uuid.uuid4()
-    tenant_b = uuid.uuid4()
+    tenant_a, tenant_b = _create_tenants(migrated_database.migration_engine)
     assessment_id = uuid.uuid4()
 
-    migrated_connection.execute(
-        text("INSERT INTO tenants (id, slug, name) VALUES (:id, :slug, :name)"),
-        {"id": tenant_a, "slug": f"tenant-{tenant_a}", "name": "Tenant A"},
-    )
-    migrated_connection.execute(
-        text("INSERT INTO tenants (id, slug, name) VALUES (:id, :slug, :name)"),
-        {"id": tenant_b, "slug": f"tenant-{tenant_b}", "name": "Tenant B"},
-    )
-    migrated_connection.execute(
-        text("SELECT set_config('app.tenant_id', :tenant_id, false)"),
-        {"tenant_id": str(tenant_a)},
-    )
-    migrated_connection.execute(
-        text(
-            "INSERT INTO assessment_records "
-            "(id, tenant_id, assessment, assessment_hash, provenance) "
-            "VALUES (:id, :tenant_id, CAST(:assessment AS jsonb), "
-            ":assessment_hash, CAST(:provenance AS jsonb))"
-        ),
-        {
-            "id": assessment_id,
-            "tenant_id": tenant_a,
-            "assessment": '{"score": 91}',
-            "assessment_hash": "sha256:assessment-a",
-            "provenance": '{"source_ids": ["evidence-a"]}',
-        },
-    )
-    migrated_connection.execute(
-        text("SELECT set_config('app.tenant_id', :tenant_id, false)"),
-        {"tenant_id": str(tenant_b)},
-    )
-
-    all_rows = migrated_connection.execute(
-        text("SELECT id FROM assessment_records")
-    ).all()
-    direct_row = migrated_connection.execute(
-        text("SELECT id FROM assessment_records WHERE id = :id"),
-        {"id": assessment_id},
-    ).first()
+    with migrated_database.app_engine.begin() as connection:
+        set_tenant_context(connection, tenant_a)
+        _insert_assessment(connection, tenant_a, assessment_id, "assessment-a")
+    with migrated_database.app_engine.begin() as connection:
+        set_tenant_context(connection, tenant_b)
+        all_rows = connection.execute(text("SELECT id FROM assessment_records")).all()
+        direct_row = connection.execute(
+            text("SELECT id FROM assessment_records WHERE id = :id"),
+            {"id": assessment_id},
+        ).first()
 
     assert all_rows == []
     assert direct_row is None
 
 
-def _schema_snapshot(database_url: str) -> dict[str, object]:
-    from sqlalchemy import create_engine
+def test_cross_tenant_assessment_reference_is_rejected(
+    migrated_database: MigratedDatabase,
+) -> None:
+    tenant_a, tenant_b = _create_tenants(migrated_database.migration_engine)
+    assessment_id = uuid.uuid4()
 
-    engine = create_engine(database_url)
-    try:
-        inspector = inspect(engine)
-        table_names = sorted(
-            table for table in inspector.get_table_names() if table != "alembic_version"
-        )
-        tables = {
-            table: {
-                "columns": [
-                    (column["name"], str(column["type"]), column["nullable"])
-                    for column in inspector.get_columns(table)
-                ],
-                "foreign_keys": sorted(
-                    (
-                        tuple(foreign_key["constrained_columns"]),
-                        foreign_key["referred_table"],
-                        tuple(foreign_key["referred_columns"]),
-                    )
-                    for foreign_key in inspector.get_foreign_keys(table)
+    with migrated_database.app_engine.begin() as connection:
+        set_tenant_context(connection, tenant_a)
+        _insert_assessment(connection, tenant_a, assessment_id, "assessment-a")
+    with pytest.raises(exc.IntegrityError) as error:
+        with migrated_database.app_engine.begin() as connection:
+            set_tenant_context(connection, tenant_b)
+            connection.execute(
+                text(
+                    "INSERT INTO decision_records "
+                    "(id, tenant_id, assessment_id, decision, reasons, "
+                    "decision_hash, provenance) VALUES "
+                    "(:id, :tenant_id, :assessment_id, 'HOLD', "
+                    "CAST(:reasons AS jsonb), :decision_hash, "
+                    "CAST(:provenance AS jsonb))"
                 ),
-            }
-            for table in table_names
+                {
+                    "id": uuid.uuid4(),
+                    "tenant_id": tenant_b,
+                    "assessment_id": assessment_id,
+                    "reasons": '["cross-tenant attempt"]',
+                    "decision_hash": "sha256:decision",
+                    "provenance": '{"source_ids": ["evidence-b"]}',
+                },
+            )
+
+    assert getattr(error.value.orig, "sqlstate", None) == "23503"
+
+
+def _create_tenants(engine: Engine) -> tuple[uuid.UUID, uuid.UUID]:
+    tenant_a = uuid.uuid4()
+    tenant_b = uuid.uuid4()
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO tenants (id, slug, name) VALUES "
+                "(:tenant_a, :slug_a, 'Tenant A'), "
+                "(:tenant_b, :slug_b, 'Tenant B')"
+            ),
+            {
+                "tenant_a": tenant_a,
+                "slug_a": f"tenant-{tenant_a}",
+                "tenant_b": tenant_b,
+                "slug_b": f"tenant-{tenant_b}",
+            },
+        )
+    return tenant_a, tenant_b
+
+
+def _insert_assessment(
+    connection: Any,
+    tenant_id: uuid.UUID,
+    assessment_id: uuid.UUID,
+    domain_assessment_id: str,
+) -> None:
+    connection.execute(
+        text(
+            "INSERT INTO assessment_records "
+            "(id, tenant_id, domain_assessment_id, assessment, "
+            "assessment_hash, provenance) VALUES "
+            "(:id, :tenant_id, :domain_assessment_id, "
+            "CAST(:assessment AS jsonb), :assessment_hash, "
+            "CAST(:provenance AS jsonb))"
+        ),
+        {
+            "id": assessment_id,
+            "tenant_id": tenant_id,
+            "domain_assessment_id": domain_assessment_id,
+            "assessment": '{"score": 91}',
+            "assessment_hash": "sha256:assessment-a",
+            "provenance": '{"source_ids": ["evidence-a"]}',
+        },
+    )
+
+
+def _schema_snapshot(engine: Engine) -> dict[str, object]:
+    inspector = inspect(engine)
+    table_names = sorted(
+        table for table in inspector.get_table_names() if table != "alembic_version"
+    )
+    tables = {
+        table: {
+            "columns": [
+                (
+                    column["name"],
+                    str(column["type"]),
+                    column["nullable"],
+                    column["default"],
+                )
+                for column in inspector.get_columns(table)
+            ],
+            "primary_key": inspector.get_pk_constraint(table),
+            "foreign_keys": inspector.get_foreign_keys(table),
+            "unique_constraints": inspector.get_unique_constraints(table),
+            "check_constraints": inspector.get_check_constraints(table),
+            "indexes": inspector.get_indexes(table),
         }
-        with engine.connect() as connection:
-            policies = (
-                connection.execute(
-                    text(
-                        "SELECT tablename, policyname, qual, with_check "
-                        "FROM pg_policies WHERE schemaname = current_schema() "
-                        "ORDER BY tablename, policyname"
-                    )
-                )
-                .tuples()
-                .all()
-            )
-            rls_flags = (
-                connection.execute(
-                    text(
-                        "SELECT relname, relrowsecurity, relforcerowsecurity "
-                        "FROM pg_class "
-                        "JOIN pg_namespace ON pg_namespace.oid = relnamespace "
-                        "WHERE nspname = current_schema() AND relkind = 'r' "
-                        "ORDER BY relname"
-                    )
-                )
-                .tuples()
-                .all()
-            )
-        return {"tables": tables, "policies": policies, "rls": rls_flags}
-    finally:
-        engine.dispose()
+        for table in table_names
+    }
+    with engine.connect() as connection:
+        return {
+            "tables": tables,
+            "policies": _rows(
+                connection,
+                "SELECT tablename, policyname, roles, cmd, qual, with_check "
+                "FROM pg_policies WHERE schemaname = current_schema() "
+                "AND tablename = ANY(:tables) ORDER BY tablename, policyname",
+                table_names,
+            ),
+            "rls": _rows(
+                connection,
+                "SELECT relname, relrowsecurity, relforcerowsecurity "
+                "FROM pg_class JOIN pg_namespace ON pg_namespace.oid = relnamespace "
+                "WHERE nspname = current_schema() AND relname = ANY(:tables) "
+                "ORDER BY relname",
+                table_names,
+            ),
+            "functions": _rows(
+                connection,
+                "SELECT proname, pg_get_function_identity_arguments(pg_proc.oid), "
+                "pg_get_functiondef(pg_proc.oid), owner.rolname "
+                "FROM pg_proc JOIN pg_namespace ns ON ns.oid = pronamespace "
+                "JOIN pg_roles owner ON owner.oid = proowner "
+                "WHERE ns.nspname = current_schema() "
+                "AND proname = 'reject_audit_event_mutation' ORDER BY proname",
+            ),
+            "triggers": _rows(
+                connection,
+                "SELECT table_name, trigger_name, action_timing, event_manipulation, "
+                "action_statement FROM information_schema.triggers "
+                "WHERE trigger_schema = current_schema() "
+                "AND table_name = ANY(:tables) "
+                "ORDER BY table_name, trigger_name, event_manipulation",
+                table_names,
+            ),
+            "grants": _rows(
+                connection,
+                "SELECT table_name, grantee, privilege_type, is_grantable "
+                "FROM information_schema.table_privileges "
+                "WHERE table_schema = current_schema() "
+                "AND table_name = ANY(:tables) "
+                "ORDER BY table_name, grantee, privilege_type",
+                table_names,
+            ),
+            "ownership": _rows(
+                connection,
+                "SELECT tablename, tableowner FROM pg_tables "
+                "WHERE schemaname = current_schema() "
+                "AND tablename = ANY(:tables) ORDER BY tablename",
+                table_names,
+            ),
+            "index_definitions": _rows(
+                connection,
+                "SELECT tablename, indexname, indexdef FROM pg_indexes "
+                "WHERE schemaname = current_schema() "
+                "AND tablename = ANY(:tables) ORDER BY tablename, indexname",
+                table_names,
+            ),
+        }
+
+
+def _rows(
+    connection: Any,
+    statement: str,
+    table_names: list[str] | None = None,
+) -> list[tuple[Any, ...]]:
+    if table_names == []:
+        return []
+    parameters = {"tables": table_names} if table_names is not None else {}
+    return list(connection.execute(text(statement), parameters).tuples())
+
+
+def _empty_schema_snapshot() -> dict[str, object]:
+    return {
+        "tables": {},
+        "policies": [],
+        "rls": [],
+        "functions": [],
+        "triggers": [],
+        "grants": [],
+        "ownership": [],
+        "index_definitions": [],
+    }
