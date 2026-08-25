@@ -4,7 +4,12 @@ import pytest
 
 from thinc_v5.db.migration_config import configure_alembic_url
 
-from .conftest import _require_disposable_database, alembic_config, safe_downgrade
+from .conftest import (
+    _require_disposable_database,
+    _require_ephemeral_role_test_cluster,
+    alembic_config,
+    safe_downgrade,
+)
 
 
 def test_destructive_migrations_require_explicit_disposable_flag(
@@ -51,3 +56,34 @@ def test_safe_downgrade_refuses_non_disposable_effective_url(
 
     with pytest.raises(pytest.fail.Exception, match="outside a test database"):
         safe_downgrade(config)
+
+
+def test_test_database_name_alone_cannot_enable_role_mutations() -> None:
+    with pytest.raises(RuntimeError, match="ephemeral GitHub Actions"):
+        _require_ephemeral_role_test_cluster(
+            "postgresql+psycopg://migrator@localhost/thinc_test",
+            "postgresql+psycopg://postgres@localhost/thinc_test",
+            {"THINC_TEST_DATABASE_DISPOSABLE": "1"},
+        )
+
+
+def test_destructive_role_token_alone_cannot_enable_role_mutations() -> None:
+    with pytest.raises(RuntimeError, match="ephemeral GitHub Actions"):
+        _require_ephemeral_role_test_cluster(
+            "postgresql+psycopg://migrator@localhost/thinc_test",
+            "postgresql+psycopg://postgres@localhost/thinc_test",
+            {"THINC_DESTRUCTIVE_ROLE_TESTS": ("postgres16-github-actions-service-v1")},
+        )
+
+
+def test_all_ephemeral_ci_signals_enable_role_mutations() -> None:
+    _require_ephemeral_role_test_cluster(
+        "postgresql+psycopg://thinc_migrator@localhost/thinc_test",
+        "postgresql+psycopg://postgres@localhost/thinc_test",
+        {
+            "GITHUB_ACTIONS": "true",
+            "CI": "true",
+            "THINC_DESTRUCTIVE_ROLE_TESTS": ("postgres16-github-actions-service-v1"),
+            "THINC_TEST_DATABASE_DISPOSABLE": "1",
+        },
+    )

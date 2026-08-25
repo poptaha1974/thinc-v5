@@ -54,6 +54,20 @@ tests additionally require a cluster-administrator connection through
 `THINC_TEST_PROVISIONER_DATABASE_URL`; that identity is never used by runtime
 or ordinary migration tests.
 
+Cluster-mutating rejection tests are restricted to the ephemeral PostgreSQL
+16 service in the GitHub Actions `quality` job. Before opening the provisioner
+connection, their guard requires all of `GITHUB_ACTIONS=true`, `CI=true`,
+`THINC_TEST_DATABASE_DISPOSABLE=1`, and the workflow-only
+`THINC_DESTRUCTIVE_ROLE_TESTS=postgres16-github-actions-service-v1` token. It
+also requires loopback PostgreSQL URLs for the exact `thinc_migrator` and
+`postgres` identities, the same test-named database, and a read-only server
+check confirming PostgreSQL 16. Missing any condition skips the mutation tests
+before the first `ALTER ROLE` or `GRANT`.
+
+Positive live tests do not request a provisioner identity and remain runnable
+against any explicitly disposable test database satisfying the migration/app
+role contract.
+
 The migration-cycle snapshot deliberately covers only THINC-owned database
 objects: the six THINC tables, their constraints/defaults/indexes/ownership,
 RLS policies, the audit trigger and function, direct table grants, the direct

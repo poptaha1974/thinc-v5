@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,6 +14,7 @@ from alembic import command
 from thinc_v5.db.migration_config import configure_alembic_url
 
 PROJECT_ROOT = Path(__file__).parents[3]
+DESTRUCTIVE_ROLE_TEST_TOKEN = "postgres16-github-actions-service-v1"
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,11 @@ def provisioner_url(database_urls: tuple[str, str]) -> str:
         pytest.fail("THINC_TEST_PROVISIONER_DATABASE_URL must point to PostgreSQL")
     if make_url(url).database != make_url(database_urls[0]).database:
         pytest.fail("provisioner and migration URLs must point to the same database")
+    try:
+        _require_ephemeral_role_test_cluster(database_urls[0], url)
+        _require_postgresql_16_provisioner(url)
+    except RuntimeError as error:
+        pytest.skip(str(error))
     return url
 
 
@@ -105,6 +111,64 @@ def _require_disposable_database(database_url: str) -> None:
     database_name = make_url(database_url).database
     if not database_name or "test" not in database_name.lower():
         pytest.fail("Refusing destructive migration test outside a test database")
+
+
+def _require_ephemeral_role_test_cluster(
+    database_url: str,
+    provisioner_url: str,
+    environ: Mapping[str, str] = os.environ,
+) -> None:
+    required_signals = {
+        "GITHUB_ACTIONS": "true",
+        "CI": "true",
+        "THINC_DESTRUCTIVE_ROLE_TESTS": DESTRUCTIVE_ROLE_TEST_TOKEN,
+        "THINC_TEST_DATABASE_DISPOSABLE": "1",
+    }
+    if any(environ.get(key) != value for key, value in required_signals.items()):
+        raise RuntimeError(
+            "destructive role tests require the ephemeral GitHub Actions "
+            "PostgreSQL 16 service"
+        )
+
+    migration = make_url(database_url)
+    provisioner = make_url(provisioner_url)
+    loopback_hosts = {"localhost", "127.0.0.1", "::1"}
+    safe_shape = (
+        migration.drivername.startswith("postgresql")
+        and provisioner.drivername.startswith("postgresql")
+        and migration.host in loopback_hosts
+        and provisioner.host in loopback_hosts
+        and migration.port in (None, 5432)
+        and provisioner.port in (None, 5432)
+        and migration.username == "thinc_migrator"
+        and provisioner.username == "postgres"
+        and migration.database == provisioner.database
+        and migration.database is not None
+        and "test" in migration.database.lower()
+    )
+    if not safe_shape:
+        raise RuntimeError(
+            "destructive role tests require loopback PostgreSQL test URLs "
+            "for thinc_migrator and postgres"
+        )
+
+
+def _require_postgresql_16_provisioner(provisioner_url: str) -> None:
+    engine = create_engine(provisioner_url)
+    try:
+        with engine.connect() as connection:
+            version_number, role = connection.execute(
+                text(
+                    "SELECT current_setting('server_version_num')::integer, "
+                    "current_user"
+                )
+            ).one()
+    finally:
+        engine.dispose()
+    if version_number // 10000 != 16 or role != "postgres":
+        raise RuntimeError(
+            "destructive role tests require PostgreSQL 16 and postgres provisioner"
+        )
 
 
 def _verify_connection_roles(
