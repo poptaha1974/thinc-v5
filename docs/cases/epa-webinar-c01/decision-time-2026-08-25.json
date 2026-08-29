@@ -1,0 +1,80 @@
+{
+  "case_notice": "Second decision point on the same campaign, six days after the first. Decision-time data as of 2026-08-25. The outcome fields here are the campaign's own delivery results, which ARE available at this decision point — they are not future data. The commercial outcome (attendance, collection) is still NOT_COLLECTED and must not be inferred from lead counts.",
+  "case_id": "epa-webinar-c01-2026-08-25",
+  "supersedes": null,
+  "companion_case": "decision-time.json (the pre-launch TEST decision of 2026-08-19, kept unmodified)",
+  "schema_version": "1.0.0",
+  "market": "EG",
+  "evidence_as_of": "2026-08-25T00:00:00+03:00",
+  "evidence_source": "Ads Manager report read by the account owner on 2026-08-25; the current day is partial",
+  "requested_decision": "SCALE",
+  "campaign_state": "live since 2026-08-20",
+  "experiment": {
+    "registered_arms": ["C01", "C02"],
+    "arms_actually_launched": ["C01"],
+    "test_executed": false,
+    "test_execution_note": "C02 never launched; the entire budget went to one arm of a two-arm experiment",
+    "success_criterion": null,
+    "success_criterion_status": "NOT_COLLECTED",
+    "stop_loss": null,
+    "stop_loss_status": "NOT_COLLECTED"
+  },
+  "delivery": {
+    "currency": "EGP",
+    "spend": 3720.52,
+    "budget": 4200,
+    "spend_pct": 88.58,
+    "remaining": 479.48,
+    "flight_end": "2026-08-26T21:00:00+03:00",
+    "impressions": 49022,
+    "reach": 24666,
+    "frequency": 1.99,
+    "link_clicks": 710,
+    "link_ctr_pct": 1.45,
+    "landing_page_views": 503,
+    "pixel_leads": 128,
+    "complete_registration": 81,
+    "cost_per_lead": 29.07,
+    "cost_per_registration": 45.93
+  },
+  "platform_split": {
+    "labelled_as": "last 7 days",
+    "actually_is": "campaign to date minus today; reconciles to 0.01 EGP and 0 leads",
+    "rows": [
+      {"platform": "facebook", "spend": 2914.01, "leads": 95, "lpv_to_lead_pct": 27.86},
+      {"platform": "audience_network", "spend": 278.91, "leads": 6, "lpv_to_lead_pct": 9.52},
+      {"platform": "instagram", "spend": 23.50, "leads": 0, "lpv_to_lead_pct": 0.0}
+    ],
+    "plan_reality_divergence": "the ad set is named Manual F+IG Feed-Reels while Audience Network carries 8.67% of spend"
+  },
+  "signal_quality": {
+    "pixel_and_capi_web": "working",
+    "event_id_deduplication": "in place",
+    "emq_web_lead": 8.7,
+    "ctwa_errors_in_scope": false,
+    "ctwa_note": "Missing CTWA clid belongs to the business messaging path; this is a website leads campaign and those errors must not be read as its failure"
+  },
+  "economics": {
+    "ad_spend": 3720.52,
+    "collected_revenue": null,
+    "collected_revenue_status": "NOT_COLLECTED",
+    "attendees": null,
+    "attendees_status": "NOT_COLLECTED",
+    "paid_enrolments": null,
+    "paid_enrolments_status": "NOT_COLLECTED",
+    "delivered_contribution_profit": null,
+    "delivered_contribution_profit_status": "NOT_COLLECTED",
+    "note": "128 leads at 29.07 EGP is a cost per event, not a cost per paying customer. HOT/WARM/COLD, WhatsApp opens and Complete Registration are all intent signals, not revenue."
+  },
+  "crm": {
+    "hot_leads_sheet_rows": 339,
+    "unique_non_empty_numbers": 110,
+    "hot": 75, "warm": 99, "cold": 165,
+    "reconciles_with_meta_leads": false,
+    "reconciliation_note": "the sheet logs events and runs and may include other sources; dividing spend by these rows to claim a cost per customer or an ROI would be invalid"
+  },
+  "human_approval": {
+    "launched_despite_open_gates": true,
+    "gates_open_at_launch": ["instagram connection", "tracking evidence pack", "C02 preparation"]
+  }
+}

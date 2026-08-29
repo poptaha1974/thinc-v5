@@ -1,0 +1,68 @@
+{
+  "case_notice": "The expected output of the v5 decision layer for decision-time.json. A Foundation build that returns anything other than HOLD here has non-functioning gates, whatever its unit tests say.",
+  "case_id": "epa-webinar-c01-2026-08",
+  "requested_decision": "TEST",
+  "expected_decision": "HOLD",
+  "expected_gates": [
+    {
+      "name": "COMPLIANCE",
+      "status": "FAIL",
+      "reasons": [
+        "the ad account 1337470373886269 is near its spending limit and delivery may halt on publish",
+        "the Instagram account egy_pioneers_academy carries a connection warning while two of the four placements are Instagram"
+      ]
+    },
+    {
+      "name": "DATA_QUALITY",
+      "status": "FAIL",
+      "reasons": [
+        "the Lead event chain is not proven",
+        "Event ID deduplication is not proven",
+        "the n8n production execution is not confirmed",
+        "the evidence pack was not supplied"
+      ]
+    },
+    {
+      "name": "EXPERIMENT_PROTOCOL",
+      "status": "FAIL",
+      "reasons": [
+        "no success criterion is registered",
+        "no stop-loss is registered",
+        "the unit of analysis is not defined"
+      ],
+      "note": "this gate does not exist in the current plan; the case is the argument for adding it"
+    },
+    {
+      "name": "HUMAN_APPROVAL",
+      "status": "FAIL",
+      "reasons": [
+        "none of the five required signatures are obtained",
+        "the seven deposit terms are not approved in writing"
+      ]
+    },
+    {
+      "name": "LIQUIDITY",
+      "status": "NOT_EVALUABLE",
+      "reasons": [
+        "the deposit value, the programme price and the margin are NOT_COLLECTED, so the gate has no input to judge"
+      ],
+      "note": "NOT_EVALUABLE must never pass, and must not be reported as FAIL — a bool cannot express this"
+    },
+    { "name": "DELIVERED_PROFIT", "status": "NOT_EVALUATED", "reasons": ["required for SCALE; the requested decision is TEST"] },
+    { "name": "SAMPLE_SIZE", "status": "NOT_EVALUATED", "reasons": ["nothing has been delivered, so there is no sample"] },
+    { "name": "OPERATIONAL_RECENCY", "status": "NOT_EVALUATED", "reasons": ["required for SCALE; the requested decision is TEST"] }
+  ],
+  "expected_invariants": [
+    "no gate reports override_allowed = true",
+    "no numeric total score appears anywhere in the response",
+    "no success probability appears anywhere in the response",
+    "every NOT_COLLECTED input is echoed as NOT_COLLECTED and never as 0",
+    "the response carries the full twelve-field provenance block"
+  ],
+  "protocol_violation": {
+    "kind": "input_invalidity",
+    "not_a_gate": true,
+    "detail": "the lifetime flight ends 2026-08-26 21:00 Cairo while the registered protocol assumes 7 days and 49 dayparting slots; launching now spends the whole budget outside the recorded design",
+    "expected_handling": "surfaced in decision_reasons as an invalid experiment input, not silently absorbed into a gate result"
+  }
+}

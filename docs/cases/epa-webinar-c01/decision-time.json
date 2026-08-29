@@ -1,0 +1,96 @@
+{
+  "case_notice": "Decision-time data only. No outcome data is present by construction — the campaign has not launched. Values recorded as NOT_COLLECTED are genuinely unknown and must never be coerced to zero.",
+  "case_id": "epa-webinar-c01-2026-08",
+  "schema_version": "1.0.0",
+  "market": "EG",
+  "evidence_as_of": "2026-08-19T00:00:00+03:00",
+  "requested_decision": "TEST",
+  "subject": {
+    "kind": "paid_media_experiment",
+    "campaign": "EPA | Webinar | Website Leads | C01-vs-C02 | W1",
+    "objective": "leads",
+    "conversion_location": "website",
+    "optimization_event": "Lead",
+    "offer": "the first 30 minutes of the Wednesday webinar, free"
+  },
+  "experiment": {
+    "hypothesis_registered": true,
+    "hypothesis": "a designed creative versus a real testimonial changes qualified lead rate",
+    "primary_variable": "creative type",
+    "variables_held_constant": ["audience", "placements", "landing page", "CTA", "link"],
+    "unit_of_analysis": null,
+    "unit_of_analysis_status": "NOT_COLLECTED",
+    "success_criterion": null,
+    "success_criterion_status": "NOT_COLLECTED",
+    "stop_loss": null,
+    "stop_loss_status": "NOT_COLLECTED",
+    "arms": [
+      { "id": "C01", "role": "control", "creative_type": "designed_image", "asset_uploaded": false },
+      { "id": "C02", "role": "challenger", "creative_type": "testimonial_video", "asset_ready": false }
+    ]
+  },
+  "budget": {
+    "currency": "EGP",
+    "type": "lifetime",
+    "amount": 4200,
+    "flight_start": "2026-08-20T10:00:00+03:00",
+    "flight_end": "2026-08-26T21:00:00+03:00",
+    "timezone": "Africa/Cairo",
+    "dayparting_slots": 49,
+    "protocol_assumes_days": 7
+  },
+  "compliance": {
+    "ad_account_id": "1337470373886269",
+    "account_spending_limit_state": "near_limit",
+    "instagram_connection_state": "warning",
+    "instagram_account": "egy_pioneers_academy",
+    "instagram_placements_enabled": true
+  },
+  "tracking": {
+    "pixel_id": "1604627917208516",
+    "lead_event_chain_proven": false,
+    "event_id_deduplication_proven": false,
+    "lead_saved_before_handoff_proven": false,
+    "n8n_production_execution_proven": false,
+    "utm_reaches_crm_proven": false,
+    "evidence_pack_supplied": false
+  },
+  "landing_page": {
+    "url": "https://webinar.popehab.com",
+    "qa_state": "conditional_go",
+    "outstanding_edits": 3,
+    "load_speed_on_4g_verified": false
+  },
+  "economics": {
+    "collected_revenue": null,
+    "collected_revenue_status": "NOT_COLLECTED",
+    "ad_spend": 0,
+    "ad_spend_note": "not launched",
+    "product_cost": null,
+    "product_cost_status": "NOT_APPLICABLE",
+    "programme_price": null,
+    "programme_price_status": "NOT_COLLECTED",
+    "deposit_value": null,
+    "deposit_value_status": "NOT_COLLECTED",
+    "deposit_terms_approved": false,
+    "contribution_margin": null,
+    "contribution_margin_status": "NOT_COLLECTED"
+  },
+  "human_approval": {
+    "required_signatures": ["offer", "landing_page", "tracking", "assets", "budget"],
+    "signatures_obtained": [],
+    "approver_id": null,
+    "approved_at": null
+  },
+  "success_definition": {
+    "primary": "delivered contribution profit, realised as a paid deposit after attending the free segment",
+    "intermediate": ["Lead", "Confirmed", "Attended"],
+    "explicitly_not_success": ["CTR", "Lead count alone"]
+  },
+  "sources": [
+    { "record": "C02 — فيديو شهادة طالب (Reel 17 يوليو) — مراجعة THINC وحالة الـDraft", "date": "2026-08-19" },
+    { "record": "EPA — خطة التنفيذ من الآن إلى النشر ثم الديبوزت", "date": "2026-08-17" },
+    { "record": "EPA — اختيار الكريتيف الأساسي من 5 صور الويبينار", "date": "2026-08-17" },
+    { "record": "EPA — Landing Page QA Decision", "date": "2026-08-17" }
+  ]
+}

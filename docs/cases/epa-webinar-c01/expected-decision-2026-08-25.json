@@ -1,0 +1,80 @@
+{
+  "case_notice": "Expected output for the SCALE request of 2026-08-25. The campaign is performing acceptably on intermediate metrics and the answer is still HOLD — that is the point of the case.",
+  "case_id": "epa-webinar-c01-2026-08-25",
+  "requested_decision": "SCALE",
+  "expected_decision": "HOLD",
+  "expected_gates": [
+    {
+      "name": "DELIVERED_PROFIT",
+      "status": "NOT_EVALUABLE",
+      "reasons": ["collected revenue, attendees and paid enrolments are all NOT_COLLECTED, so delivered contribution profit cannot be computed"],
+      "note": "the spec requires positive delivered profit for SCALE; absent data can never satisfy it"
+    },
+    {
+      "name": "EXPERIMENT_PROTOCOL",
+      "status": "FAIL",
+      "reasons": [
+        "the registered experiment has two arms and only one launched",
+        "no success criterion and no stop-loss were ever registered"
+      ],
+      "note": "the pre-launch case predicted this gate would fail; what happened is worse than predicted — the experiment did not run at all"
+    },
+    {
+      "name": "DATA_QUALITY",
+      "status": "FAIL",
+      "reasons": [
+        "the commercial loop from lead to attendance to collection is not linked by contact_id and event_id",
+        "the CRM sheet does not reconcile with the platform lead count and cannot be used for cost per customer"
+      ],
+      "note": "the web signal itself is good — pixel, CAPI and an EMQ of 8.7 — the failure is downstream of the lead"
+    },
+    {
+      "name": "COMPLIANCE",
+      "status": "FAIL",
+      "reasons": ["the Instagram account connection warning is unresolved and Instagram delivery is effectively absent: 23.50 EGP for zero leads"]
+    },
+    {
+      "name": "SAMPLE_SIZE",
+      "status": "NOT_EVALUABLE",
+      "reasons": ["no success criterion was registered, so there is no pre-specified sample size to have reached"]
+    },
+    {
+      "name": "OPERATIONAL_RECENCY",
+      "status": "PASS",
+      "reasons": ["delivery data is current to the reading date"]
+    },
+    {
+      "name": "LIQUIDITY",
+      "status": "NOT_EVALUABLE",
+      "reasons": ["the deposit value, programme price and margin remain unapproved"]
+    },
+    {
+      "name": "HUMAN_APPROVAL",
+      "status": "NOT_EVALUATED",
+      "reasons": ["no approval was requested for a scaling decision"]
+    }
+  ],
+  "expected_invariants": [
+    "a low cost per lead never compensates for NOT_EVALUABLE delivered profit",
+    "intent signals (HOT/WARM/COLD, WhatsApp opens, Complete Registration) are never counted as revenue",
+    "a partial day is never treated as a complete observation",
+    "the platform split is not attributed to the current day's performance"
+  ],
+  "findings_produced_by_this_case": [
+    {
+      "id": 15,
+      "title": "a gate that is not in the execution path is not a gate",
+      "detail": "the campaign launched while three gates were open. The v5 model returns HOLD correctly, but nothing in the world prevented the launch. Foundation must state where the gate sits in the real workflow, or it documents decisions rather than governing them."
+    },
+    {
+      "id": 16,
+      "title": "experiment integrity is invisible to performance metrics",
+      "detail": "every delivery number here looks healthy while the registered two-arm test never ran. No CPL, CTR or conversion rate can reveal that. This is the strongest argument for EXPERIMENT_PROTOCOL as a named, independent gate rather than a line in a test."
+    },
+    {
+      "id": 17,
+      "title": "aggregation windows need to be part of the contract",
+      "detail": "a platform breakdown labelled 'last 7 days' was in fact the campaign minus the current day. It only surfaced through arithmetic. Any outcome record must carry its own window explicitly, not a label."
+    }
+  ]
+}
